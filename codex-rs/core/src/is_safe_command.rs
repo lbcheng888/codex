@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use tree_sitter::Parser;
 use tree_sitter::Tree;
 use tree_sitter_bash::LANGUAGE as BASH;

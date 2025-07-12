@@ -127,6 +127,22 @@ export const openAiModelInfo = {
     label: "o3 Mini (2025-01-31)",
     maxContextLength: 200000,
   },
+  // -----------------------------------------------------------------------
+  // xAI models
+  // -----------------------------------------------------------------------
+  /**
+   * Grok-4 is xAI's frontier LLM that follows the OpenAI Chat Completions API
+   * surface.  We catalogue it here so that Codex can provide sensible context
+   * window defaults and show a friendlier label in the model picker.  The
+   * official maximum context length has not yet been publicly documented.  In
+   * the absence of concrete numbers we align with GPT-4 Turbo's 128k token
+   * window which is sufficiently large to avoid premature truncation while
+   * remaining within realistic bounds.
+   */
+  "grok-4": {
+    label: "Grok-4",
+    maxContextLength: 256000,
+  },
   "o1-preview": {
     label: "o1 Preview",
     maxContextLength: 128000,

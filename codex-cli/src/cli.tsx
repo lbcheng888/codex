@@ -222,6 +222,16 @@ const cli = meow(
 // Global flag handling
 // ---------------------------------------------------------------------------
 
+// Auto-detect pipe input and enable quiet mode
+if (!process.stdin.isTTY && !cli.flags.quiet) {
+  cli.flags.quiet = true;
+  // Optionally show a warning that pipe mode was detected
+  if (process.env["DEBUG"]) {
+    // eslint-disable-next-line no-console
+    console.error("[codex] Pipe input detected, automatically enabling quiet mode");
+  }
+}
+
 // Handle 'completion' subcommand before any prompting or API calls
 if (cli.input[0] === "completion") {
   const shell = cli.input[1] || "bash";
@@ -549,6 +559,17 @@ const additionalWritableRoots: ReadonlyArray<string> = (
 // For --quiet, run the cli without user interactions and exit.
 if (cli.flags.quiet) {
   process.env["CODEX_QUIET_MODE"] = "1";
+  
+  // If no prompt provided but stdin is piped, read from stdin
+  if ((!prompt || prompt.trim() === "") && !process.stdin.isTTY) {
+    // Read from stdin
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(chunk);
+    }
+    prompt = Buffer.concat(chunks).toString('utf8').trim();
+  }
+  
   if (!prompt || prompt.trim() === "") {
     // eslint-disable-next-line no-console
     console.error(

@@ -15,8 +15,41 @@ import { providers } from "./providers.js";
 import { config as loadDotenv } from "dotenv";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { load as loadYaml, dump as dumpYaml } from "js-yaml";
+import * as TOML from "@iarna/toml";
 import { homedir } from "os";
 import { dirname, join, extname, resolve as resolvePath } from "path";
+
+// ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert snake_case keys to camelCase recursively
+ */
+function snakeToCamelCase<T>(obj: any): T {
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+  
+  if (Array.isArray(obj)) {
+    return obj.map(item => snakeToCamelCase(item)) as any;
+  }
+  
+  const converted: any = {};
+  for (const [key, value] of Object.entries(obj)) {
+    let camelKey = key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+    
+    // Special handling for common acronyms
+    if (camelKey === 'baseUrl') {
+      camelKey = 'baseURL';
+    } else if (camelKey === 'apiKey') {
+      camelKey = 'apiKey';
+    }
+    
+    converted[camelKey] = snakeToCamelCase(value);
+  }
+  return converted;
+}
 
 // ---------------------------------------------------------------------------
 // User‑wide environment config (~/.codex.env)
@@ -56,11 +89,11 @@ export const CONFIG_DIR = join(homedir(), ".codex");
 export const CONFIG_JSON_FILEPATH = join(CONFIG_DIR, "config.json");
 export const CONFIG_YAML_FILEPATH = join(CONFIG_DIR, "config.yaml");
 export const CONFIG_YML_FILEPATH = join(CONFIG_DIR, "config.yml");
+export const CONFIG_TOML_FILEPATH = join(CONFIG_DIR, "config.toml");
 
 // Keep the original constant name for backward compatibility, but point it at
-// the default JSON path. Code that relies on this constant will continue to
-// work unchanged.
-export const CONFIG_FILEPATH = CONFIG_JSON_FILEPATH;
+// the TOML path now.
+export const CONFIG_FILEPATH = CONFIG_TOML_FILEPATH;
 export const INSTRUCTIONS_FILEPATH = join(CONFIG_DIR, "instructions.md");
 
 export const OPENAI_TIMEOUT_MS =
@@ -334,12 +367,14 @@ export const loadConfig = (
   options: LoadConfigOptions = {},
 ): AppConfig => {
   // Determine the actual path to load. If the provided path doesn't exist and
-  // the caller passed the default JSON path, automatically fall back to YAML
-  // variants.
+  // the caller passed the default TOML path, automatically fall back to JSON/YAML
+  // variants for backward compatibility.
   let actualConfigPath = configPath;
   if (!existsSync(actualConfigPath)) {
     if (configPath === CONFIG_FILEPATH) {
-      if (existsSync(CONFIG_YAML_FILEPATH)) {
+      if (existsSync(CONFIG_JSON_FILEPATH)) {
+        actualConfigPath = CONFIG_JSON_FILEPATH;
+      } else if (existsSync(CONFIG_YAML_FILEPATH)) {
         actualConfigPath = CONFIG_YAML_FILEPATH;
       } else if (existsSync(CONFIG_YML_FILEPATH)) {
         actualConfigPath = CONFIG_YML_FILEPATH;
@@ -352,7 +387,11 @@ export const loadConfig = (
     const raw = readFileSync(actualConfigPath, "utf-8");
     const ext = extname(actualConfigPath).toLowerCase();
     try {
-      if (ext === ".yaml" || ext === ".yml") {
+      if (ext === ".toml") {
+        const parsed = TOML.parse(raw);
+        // Convert snake_case to camelCase for TOML files
+        storedConfig = snakeToCamelCase<StoredConfig>(parsed);
+      } else if (ext === ".yaml" || ext === ".yml") {
         storedConfig = loadYaml(raw) as unknown as StoredConfig;
       } else {
         storedConfig = JSON.parse(raw);
@@ -467,7 +506,9 @@ export const loadConfig = (
       // back to whatever DEFAULT_MODEL is current at runtime.  This prevents
       // pinning users to an old default after upgrading Codex.
       const ext = extname(actualConfigPath).toLowerCase();
-      if (ext === ".yaml" || ext === ".yml") {
+      if (ext === ".toml") {
+        writeFileSync(actualConfigPath, TOML.stringify(EMPTY_STORED_CONFIG), "utf-8");
+      } else if (ext === ".yaml" || ext === ".yml") {
         writeFileSync(actualConfigPath, dumpYaml(EMPTY_STORED_CONFIG), "utf-8");
       } else {
         writeFileSync(actualConfigPath, EMPTY_CONFIG_JSON, "utf-8");
@@ -531,18 +572,21 @@ export const saveConfig = (
   configPath = CONFIG_FILEPATH,
   instructionsPath = INSTRUCTIONS_FILEPATH,
 ): void => {
-  // If the caller passed the default JSON path *and* a YAML config already
-  // exists on disk, save back to that YAML file instead to preserve the
+  // If the caller passed the default TOML path *and* a JSON/YAML config already
+  // exists on disk, save back to that file instead to preserve the
   // user's chosen format.
   let targetPath = configPath;
   if (
     configPath === CONFIG_FILEPATH &&
-    !existsSync(configPath) &&
-    (existsSync(CONFIG_YAML_FILEPATH) || existsSync(CONFIG_YML_FILEPATH))
+    !existsSync(configPath)
   ) {
-    targetPath = existsSync(CONFIG_YAML_FILEPATH)
-      ? CONFIG_YAML_FILEPATH
-      : CONFIG_YML_FILEPATH;
+    if (existsSync(CONFIG_JSON_FILEPATH)) {
+      targetPath = CONFIG_JSON_FILEPATH;
+    } else if (existsSync(CONFIG_YAML_FILEPATH)) {
+      targetPath = CONFIG_YAML_FILEPATH;
+    } else if (existsSync(CONFIG_YML_FILEPATH)) {
+      targetPath = CONFIG_YML_FILEPATH;
+    }
   }
 
   const dir = dirname(targetPath);
@@ -583,7 +627,9 @@ export const saveConfig = (
     };
   }
 
-  if (ext === ".yaml" || ext === ".yml") {
+  if (ext === ".toml") {
+    writeFileSync(targetPath, TOML.stringify(configToSave), "utf-8");
+  } else if (ext === ".yaml" || ext === ".yml") {
     writeFileSync(targetPath, dumpYaml(configToSave), "utf-8");
   } else {
     writeFileSync(targetPath, JSON.stringify(configToSave, null, 2), "utf-8");

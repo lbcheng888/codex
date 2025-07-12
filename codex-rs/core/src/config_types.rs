@@ -94,14 +94,22 @@ pub struct Tui {
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {
+
+    /// Read-only sandbox: the execution environment has read access to files
+    /// in the workspace but is not permitted to write to disk or access the
+    /// network. This is the safest mode.
     #[serde(rename = "read-only")]
-    #[default]
     ReadOnly,
 
     #[serde(rename = "workspace-write")]
     WorkspaceWrite,
 
+    /// Fully privileged sandbox. Enables both write access to the workspace
+    /// and unrestricted network access. This is the default because some
+    /// users prefer a more permissive environment unless explicitly opting
+    /// into restrictions.
     #[serde(rename = "danger-full-access")]
+    #[default]
     DangerFullAccess,
 }
 

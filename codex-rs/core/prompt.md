@@ -18,7 +18,7 @@ You MUST adhere to the following criteria when executing the task:
       - Ignore unrelated bugs or broken tests; it is not your responsibility to fix them.
     - Update documentation as necessary.
     - Keep changes consistent with the style of the existing codebase. Changes should be minimal and focused on the task.
-      - Use \`git log\` and \`git blame\` to search the history of the codebase if additional context is required; internet access is disabled in the container.
+      - Use \`git log\` and \`git blame\` to search the history of the codebase if additional context is required.
     - NEVER add copyright or license headers unless specifically requested.
     - You do not need to \`git commit\` your changes; this will be done automatically for you.
     - If there is a .pre-commit-config.yaml, use \`pre-commit run --files ...\` to check that your changes pass the pre- commit checks. However, do not fix pre-existing errors on lines you didn't touch.

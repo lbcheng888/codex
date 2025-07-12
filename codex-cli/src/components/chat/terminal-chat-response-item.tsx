@@ -187,10 +187,6 @@ function TerminalChatResponseToolCall({
   }
   return (
     <Box flexDirection="column" gap={1}>
-      <Text color="magentaBright" bold>
-        command
-        {workdir ? <Text dimColor>{` (${workdir})`}</Text> : ""}
-      </Text>
       <Text>
         <Text dimColor>$</Text> {cmdReadableText}
       </Text>
@@ -251,10 +247,6 @@ function TerminalChatResponseToolCallOutput({
     .join("\n");
   return (
     <Box flexDirection="column" gap={1}>
-      <Text color="magenta" bold>
-        command.stdout{" "}
-        <Text dimColor>{metadataInfo ? `(${metadataInfo})` : ""}</Text>
-      </Text>
       <Text dimColor>{colorizedContent}</Text>
     </Box>
   );

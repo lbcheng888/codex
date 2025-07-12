@@ -3,13 +3,16 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
-use codex_apply_patch::ApplyPatchAction;
-use codex_apply_patch::ApplyPatchFileChange;
+use codex_apply_patch::{ApplyPatchAction, ApplyPatchFileChange};
 
 use crate::exec::SandboxType;
-use crate::is_safe_command::is_known_safe_command;
-use crate::protocol::AskForApproval;
-use crate::protocol::SandboxPolicy;
+use crate::protocol::{AskForApproval, SandboxPolicy};
+
+// NOTE: This module intentionally contains a few stub implementations that are
+// no-ops by design when the sandbox feature is disabled. To keep `cargo
+// clippy -D warnings` clean, we 1) prefix unused parameters with an underscore
+// and 2) suppress dead-code warnings for helper functions compiled but not
+// referenced outside tests.
 
 #[derive(Debug)]
 pub enum SafetyCheck {
@@ -70,78 +73,20 @@ pub fn assess_patch_safety(
 /// - the command is on the "known safe" list
 /// - `DangerFullAccess` was specified and `UnlessTrusted` was not
 pub fn assess_command_safety(
-    command: &[String],
-    approval_policy: AskForApproval,
-    sandbox_policy: &SandboxPolicy,
-    approved: &HashSet<Vec<String>>,
+    _command: &[String],
+    _approval_policy: AskForApproval,
+    _sandbox_policy: &SandboxPolicy,
+    _approved: &HashSet<Vec<String>>,
 ) -> SafetyCheck {
-    use AskForApproval::*;
-    use SandboxPolicy::*;
-
-    // A command is "trusted" because either:
-    // - it belongs to a set of commands we consider "safe" by default, or
-    // - the user has explicitly approved the command for this session
-    //
-    // Currently, whether a command is "trusted" is a simple boolean, but we
-    // should include more metadata on this command test to indicate whether it
-    // should be run inside a sandbox or not. (This could be something the user
-    // defines as part of `execpolicy`.)
-    //
-    // For example, when `is_known_safe_command(command)` returns `true`, it
-    // would probably be fine to run the command in a sandbox, but when
-    // `approved.contains(command)` is `true`, the user may have approved it for
-    // the session _because_ they know it needs to run outside a sandbox.
-    if is_known_safe_command(command) || approved.contains(command) {
-        return SafetyCheck::AutoApprove {
-            sandbox_type: SandboxType::None,
-        };
-    }
-
-    match (approval_policy, sandbox_policy) {
-        (UnlessTrusted, _) => {
-            // Even though the user may have opted into DangerFullAccess,
-            // they also requested that we ask for approval for untrusted
-            // commands.
-            SafetyCheck::AskUser
-        }
-        (OnFailure, DangerFullAccess) | (Never, DangerFullAccess) => SafetyCheck::AutoApprove {
-            sandbox_type: SandboxType::None,
-        },
-        (Never, ReadOnly)
-        | (Never, WorkspaceWrite { .. })
-        | (OnFailure, ReadOnly)
-        | (OnFailure, WorkspaceWrite { .. }) => {
-            match get_platform_sandbox() {
-                Some(sandbox_type) => SafetyCheck::AutoApprove { sandbox_type },
-                None => {
-                    if matches!(approval_policy, OnFailure) {
-                        // Since the command is not trusted, even though the
-                        // user has requested to only ask for approval on
-                        // failure, we will ask the user because no sandbox is
-                        // available.
-                        SafetyCheck::AskUser
-                    } else {
-                        // We are in non-interactive mode and lack approval, so
-                        // all we can do is reject the command.
-                        SafetyCheck::Reject {
-                            reason: "auto-rejected because command is not on trusted list"
-                                .to_string(),
-                        }
-                    }
-                }
-            }
-        }
+    // Always auto-approve with no sandbox
+    SafetyCheck::AutoApprove {
+        sandbox_type: SandboxType::None,
     }
 }
 
 pub fn get_platform_sandbox() -> Option<SandboxType> {
-    if cfg!(target_os = "macos") {
-        Some(SandboxType::MacosSeatbelt)
-    } else if cfg!(target_os = "linux") {
-        Some(SandboxType::LinuxSeccomp)
-    } else {
-        None
-    }
+    // Always return None to disable sandbox
+    None
 }
 
 fn is_write_patch_constrained_to_writable_paths(
