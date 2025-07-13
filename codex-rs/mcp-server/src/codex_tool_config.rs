@@ -1,6 +1,5 @@
 //! Configuration object accepted by the `codex` MCP tool-call.
 
-use codex_core::config_types::SandboxMode;
 use codex_core::protocol::AskForApproval;
 use mcp_types::Tool;
 use mcp_types::ToolInputSchema;
@@ -38,8 +37,8 @@ pub(crate) struct CodexToolCallParam {
     pub approval_policy: Option<CodexToolCallApprovalPolicy>,
 
     /// Sandbox mode: `read-only`, `workspace-write`, or `danger-full-access`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<CodexToolCallSandboxMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "sandbox")]
+    pub _sandbox: Option<CodexToolCallSandboxMode>,
 
     /// Individual config settings that will override what is in
     /// CODEX_HOME/config.toml.
@@ -77,15 +76,7 @@ pub(crate) enum CodexToolCallSandboxMode {
     DangerFullAccess,
 }
 
-impl From<CodexToolCallSandboxMode> for SandboxMode {
-    fn from(value: CodexToolCallSandboxMode) -> Self {
-        match value {
-            CodexToolCallSandboxMode::ReadOnly => SandboxMode::ReadOnly,
-            CodexToolCallSandboxMode::WorkspaceWrite => SandboxMode::WorkspaceWrite,
-            CodexToolCallSandboxMode::DangerFullAccess => SandboxMode::DangerFullAccess,
-        }
-    }
-}
+// Sandbox modes are no longer supported - all functionality removed
 
 /// Builds a `Tool` definition (JSON schema etc.) for the Codex tool-call.
 pub(crate) fn create_tool_for_codex_tool_call_param() -> Tool {
@@ -121,7 +112,7 @@ impl CodexToolCallParam {
     /// effective Config object generated from the supplied parameters.
     pub fn into_config(
         self,
-        codex_linux_sandbox_exe: Option<PathBuf>,
+        _codex_linux_sandbox_exe: Option<PathBuf>,
     ) -> std::io::Result<(String, codex_core::config::Config)> {
         let Self {
             prompt,
@@ -129,7 +120,7 @@ impl CodexToolCallParam {
             profile,
             cwd,
             approval_policy,
-            sandbox,
+            _sandbox: _,
             config: cli_overrides,
         } = self;
 
@@ -139,9 +130,7 @@ impl CodexToolCallParam {
             config_profile: profile,
             cwd: cwd.map(PathBuf::from),
             approval_policy: approval_policy.map(Into::into),
-            sandbox_mode: sandbox.map(Into::into),
             model_provider: None,
-            codex_linux_sandbox_exe,
         };
 
         let cli_overrides = cli_overrides

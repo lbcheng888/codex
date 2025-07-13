@@ -4,7 +4,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::BorderType;
 use ratatui::widgets::Borders;
@@ -20,10 +19,13 @@ use super::file_search_popup::FileSearchPopup;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::theme::Theme;
 use codex_file_search::FileMatch;
 
 /// Minimum number of visible text rows inside the textarea.
 const MIN_TEXTAREA_ROWS: usize = 1;
+/// Maximum number of visible text rows to prevent excessive height
+const MAX_TEXTAREA_ROWS: usize = 12;
 /// Rows consumed by the border.
 const BORDER_LINES: u16 = 2;
 
@@ -43,6 +45,7 @@ pub(crate) struct ChatComposer<'a> {
     ctrl_c_quit_hint: bool,
     dismissed_file_popup_token: Option<String>,
     current_file_query: Option<String>,
+    theme: Theme,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -66,6 +69,7 @@ impl ChatComposer<'_> {
             ctrl_c_quit_hint: false,
             dismissed_file_popup_token: None,
             current_file_query: None,
+            theme: Theme::default(),
         };
         this.update_border(has_input_focus);
         this
@@ -517,14 +521,19 @@ impl ChatComposer<'_> {
     }
 
     pub fn calculate_required_height(&self, area: &Rect) -> u16 {
-        let rows = self.textarea.lines().len().max(MIN_TEXTAREA_ROWS);
+        // Constrain textarea height to prevent layout instability
+        let lines_count = self.textarea.lines().len();
+        let rows = lines_count.max(MIN_TEXTAREA_ROWS).min(MAX_TEXTAREA_ROWS);
+        
         let num_popup_rows = match &self.active_popup {
             ActivePopup::Command(popup) => popup.calculate_required_height(area),
             ActivePopup::File(popup) => popup.calculate_required_height(area),
             ActivePopup::None => 0,
         };
 
-        rows as u16 + BORDER_LINES + num_popup_rows
+        // Ensure we don't exceed available space
+        let total_height = rows as u16 + BORDER_LINES + num_popup_rows;
+        total_height.min(area.height / 2) // Never take more than half the screen
     }
 
     fn update_border(&mut self, has_focus: bool) {
@@ -536,20 +545,20 @@ impl ChatComposer<'_> {
         let bs = if has_focus {
             if self.ctrl_c_quit_hint {
                 BlockState {
-                    right_title: Line::from("Ctrl+C to quit").alignment(Alignment::Right),
-                    border_style: Style::default(),
+                    right_title: self.create_keyboard_hint_line("Ctrl+C", "quit"),
+                    border_style: Style::default().fg(self.theme.ui.border_focused),
                 }
             } else {
                 BlockState {
-                    right_title: Line::from("Enter to send | Ctrl+D to quit | Ctrl+J for newline")
-                        .alignment(Alignment::Right),
-                    border_style: Style::default(),
+                    right_title: self.create_multi_keyboard_hints(),
+                    border_style: Style::default().fg(self.theme.ui.border_focused),
                 }
             }
         } else {
             BlockState {
-                right_title: Line::from(""),
-                border_style: Style::default().dim(),
+                right_title: Line::from("Tab to focus").alignment(Alignment::Right)
+                    .style(self.theme.help_text_style()),
+                border_style: Style::default().fg(self.theme.ui.border_unfocused),
             }
         };
 
@@ -560,6 +569,33 @@ impl ChatComposer<'_> {
                 .border_type(BorderType::Rounded)
                 .border_style(bs.border_style),
         );
+    }
+
+    /// Create a styled keyboard hint line with key and action
+    fn create_keyboard_hint_line(&self, key: &str, action: &str) -> Line<'static> {
+        use ratatui::text::Span;
+        Line::from(vec![
+            Span::styled(key.to_string(), self.theme.shortcut_key_style()),
+            Span::styled(" ".to_string(), Style::default()),
+            Span::styled(action.to_string(), self.theme.help_text_style()),
+        ])
+        .alignment(Alignment::Right)
+    }
+
+    /// Create multiple keyboard hints in a compact format
+    fn create_multi_keyboard_hints(&self) -> Line<'static> {
+        use ratatui::text::Span;
+        Line::from(vec![
+            Span::styled("Enter".to_string(), self.theme.shortcut_key_style()),
+            Span::styled(" send".to_string(), self.theme.help_text_style()),
+            Span::styled(" | ".to_string(), self.theme.dim_style()),
+            Span::styled("Ctrl+D".to_string(), self.theme.shortcut_key_style()),
+            Span::styled(" quit".to_string(), self.theme.help_text_style()),
+            Span::styled(" | ".to_string(), self.theme.dim_style()),
+            Span::styled("Ctrl+J".to_string(), self.theme.shortcut_key_style()),
+            Span::styled(" newline".to_string(), self.theme.help_text_style()),
+        ])
+        .alignment(Alignment::Right)
     }
 
     pub(crate) fn is_popup_visible(&self) -> bool {

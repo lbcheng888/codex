@@ -23,10 +23,9 @@ codex-core = { path = "../core" }
 codex-common = { path = "../common", features = [
     "cli",
     "elapsed",
-    "sandbox_summary",
 ] }
 codex-file-search = { path = "../file-search" }
-codex-linux-sandbox = { path = "../linux-sandbox" }
+
 codex-login = { path = "../login" }
 color-eyre = "0.6.3"
 crossterm = { version = "0.28.1", features = ["bracketed-paste"] }

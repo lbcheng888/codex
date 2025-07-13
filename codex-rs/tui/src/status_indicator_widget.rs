@@ -11,8 +11,6 @@ use std::time::Duration;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
-use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -26,6 +24,7 @@ use ratatui::widgets::WidgetRef;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::theme::Theme;
 
 use codex_ansi_escape::ansi_escape_line;
 
@@ -46,6 +45,7 @@ pub(crate) struct StatusIndicatorWidget {
     // accessed anywhere, therefore the leading underscore silences the
     // `dead_code` warning without affecting behavior.
     _app_event_tx: AppEventSender,
+    theme: Theme,
 }
 
 impl StatusIndicatorWidget {
@@ -76,6 +76,7 @@ impl StatusIndicatorWidget {
             frame_idx,
             running,
             _app_event_tx: app_event_tx,
+            theme: Theme::default(),
         }
     }
 
@@ -99,12 +100,11 @@ impl Drop for StatusIndicatorWidget {
 
 impl WidgetRef for StatusIndicatorWidget {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let widget_style = Style::default();
         let block = Block::default()
             .padding(Padding::new(1, 0, 0, 0))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(widget_style.dim());
+            .border_style(self.theme.loading_style());
         // Animated 3‑dot pattern inside brackets. The *active* dot is bold
         // white, the others are dim.
         const DOT_COUNT: usize = 3;
@@ -119,35 +119,27 @@ impl WidgetRef for StatusIndicatorWidget {
         let mut header_spans: Vec<Span<'static>> = Vec::new();
 
         header_spans.push(Span::styled(
-            "Working ",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            "⚡ Working ",
+            self.theme.loading_style(),
         ));
 
         header_spans.push(Span::styled(
             "[",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            self.theme.emphasis_style(),
         ));
 
         for i in 0..DOT_COUNT {
             let style = if i == active {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
+                self.theme.loading_style()
             } else {
-                Style::default().dim()
+                self.theme.dim_style()
             };
-            header_spans.push(Span::styled(".", style));
+            header_spans.push(Span::styled("●", style)); // Use filled circle instead of dot
         }
 
         header_spans.push(Span::styled(
             "] ",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            self.theme.emphasis_style(),
         ));
 
         // Ensure we do not overflow width.

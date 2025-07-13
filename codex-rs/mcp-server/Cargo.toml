@@ -17,7 +17,8 @@ workspace = true
 [dependencies]
 anyhow = "1"
 codex-core = { path = "../core" }
-codex-linux-sandbox = { path = "../linux-sandbox" }
+futures = "0.3"
+
 mcp-types = { path = "../mcp-types" }
 schemars = "0.8.22"
 serde = { version = "1", features = ["derive"] }
@@ -26,12 +27,15 @@ toml = "0.9"
 tracing = { version = "0.1.41", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tokio = { version = "1", features = [
+    "fs",
     "io-std",
     "macros",
     "process",
     "rt-multi-thread",
     "signal",
+    "time",
 ] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+tempfile = "3"

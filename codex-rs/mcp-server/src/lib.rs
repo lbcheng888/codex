@@ -17,7 +17,8 @@ use tracing::info;
 mod codex_tool_config;
 mod codex_tool_runner;
 mod json_to_toml;
-mod message_processor;
+pub mod message_processor;
+mod parallel_read_tool;
 
 use crate::message_processor::MessageProcessor;
 

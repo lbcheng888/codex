@@ -1,8 +1,5 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
-use ratatui::style::Style;
-use ratatui::style::Stylize;
 use ratatui::widgets::Block;
 use ratatui::widgets::BorderType;
 use ratatui::widgets::Borders;
@@ -14,6 +11,7 @@ use ratatui::widgets::WidgetRef;
 
 use crate::slash_command::SlashCommand;
 use crate::slash_command::built_in_slash_commands;
+use crate::theme::Theme;
 
 const MAX_POPUP_ROWS: usize = 5;
 /// Ideally this is enough to show the longest command name.
@@ -25,6 +23,7 @@ pub(crate) struct CommandPopup {
     command_filter: String,
     all_commands: Vec<(&'static str, SlashCommand)>,
     selected_idx: Option<usize>,
+    theme: Theme,
 }
 
 impl CommandPopup {
@@ -33,6 +32,7 @@ impl CommandPopup {
             command_filter: String::new(),
             all_commands: built_in_slash_commands(),
             selected_idx: None,
+            theme: Theme::default(),
         }
     }
 
@@ -152,19 +152,20 @@ impl WidgetRef for CommandPopup {
         if visible_matches.is_empty() {
             rows.push(Row::new(vec![
                 Cell::from(""),
-                Cell::from("No matching commands").add_modifier(Modifier::ITALIC),
+                Cell::from("No matching commands").style(self.theme.dim_style().add_modifier(Modifier::ITALIC)),
             ]));
         } else {
-            let default_style = Style::default();
-            let command_style = Style::default().fg(Color::LightBlue);
             for (idx, cmd) in visible_matches.iter().enumerate() {
                 let (cmd_style, desc_style) = if Some(idx) == self.selected_idx {
                     (
-                        command_style.bg(Color::DarkGray),
-                        default_style.bg(Color::DarkGray),
+                        self.theme.active_item_style(),
+                        self.theme.active_item_style(),
                     )
                 } else {
-                    (command_style, default_style)
+                    (
+                        self.theme.emphasis_style().fg(self.theme.ui.selection),
+                        self.theme.inactive_item_style(),
+                    )
                 };
 
                 rows.push(Row::new(vec![
@@ -184,7 +185,9 @@ impl WidgetRef for CommandPopup {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
+                .border_type(BorderType::Rounded)
+                .border_style(self.theme.popup_border_style())
+                .style(self.theme.popup_background_style()),
         );
 
         table.render(area, buf);

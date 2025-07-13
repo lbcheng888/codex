@@ -1,5 +1,4 @@
-// Poisoned mutex should fail the program
-#![allow(clippy::unwrap_used)]
+// Improved error handling for mutex operations
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -43,10 +42,8 @@ use crate::config_types::ShellEnvironmentPolicy;
 use crate::conversation_history::ConversationHistory;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
-use crate::error::SandboxErr;
 use crate::exec::ExecParams;
 use crate::exec::ExecToolCallOutput;
-use crate::exec::SandboxType;
 use crate::exec::process_exec_tool_call;
 use crate::exec_env::create_env;
 use crate::flags::OPENAI_STREAM_MAX_RETRIES;
@@ -69,7 +66,6 @@ use crate::protocol::BackgroundEventEvent;
 use crate::protocol::ErrorEvent;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
-use crate::protocol::ExecApprovalRequestEvent;
 use crate::protocol::ExecCommandBeginEvent;
 use crate::protocol::ExecCommandEndEvent;
 use crate::protocol::FileChange;
@@ -78,7 +74,6 @@ use crate::protocol::Op;
 use crate::protocol::PatchApplyBeginEvent;
 use crate::protocol::PatchApplyEndEvent;
 use crate::protocol::ReviewDecision;
-use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionConfiguredEvent;
 use crate::protocol::Submission;
 use crate::protocol::TaskCompleteEvent;
@@ -113,7 +108,6 @@ impl Codex {
             model_reasoning_summary: config.model_reasoning_summary,
             instructions,
             approval_policy: config.approval_policy,
-            sandbox_policy: config.sandbox_policy.clone(),
             disable_response_storage: config.disable_response_storage,
             notify: config.notify.clone(),
             cwd: config.cwd.clone(),
@@ -176,7 +170,6 @@ pub(crate) struct Session {
     cwd: PathBuf,
     instructions: Option<String>,
     approval_policy: AskForApproval,
-    sandbox_policy: SandboxPolicy,
     shell_environment_policy: ShellEnvironmentPolicy,
     writable_roots: Mutex<Vec<PathBuf>>,
 
@@ -191,7 +184,6 @@ pub(crate) struct Session {
     /// sessions can be replayed or inspected later.
     rollout: Mutex<Option<RolloutRecorder>>,
     state: Mutex<State>,
-    codex_linux_sandbox_exe: Option<PathBuf>,
 }
 
 impl Session {
@@ -218,7 +210,7 @@ struct State {
 
 impl Session {
     pub fn set_task(&self, task: AgentTask) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("Session state mutex was poisoned");
         if let Some(current_task) = state.current_task.take() {
             current_task.abort();
         }
@@ -226,7 +218,7 @@ impl Session {
     }
 
     pub fn remove_task(&self, sub_id: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("Session state mutex was poisoned");
         if let Some(task) = &state.current_task {
             if task.sub_id == sub_id {
                 state.current_task.take();
@@ -240,30 +232,6 @@ impl Session {
         if let Err(e) = self.tx_event.send(event).await {
             error!("failed to send tool call event: {e}");
         }
-    }
-
-    pub async fn request_command_approval(
-        &self,
-        sub_id: String,
-        command: Vec<String>,
-        cwd: PathBuf,
-        reason: Option<String>,
-    ) -> oneshot::Receiver<ReviewDecision> {
-        let (tx_approve, rx_approve) = oneshot::channel();
-        let event = Event {
-            id: sub_id.clone(),
-            msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
-                command,
-                cwd,
-                reason,
-            }),
-        };
-        let _ = self.tx_event.send(event).await;
-        {
-            let mut state = self.state.lock().unwrap();
-            state.pending_approvals.insert(sub_id, tx_approve);
-        }
-        rx_approve
     }
 
     pub async fn request_patch_approval(
@@ -284,22 +252,17 @@ impl Session {
         };
         let _ = self.tx_event.send(event).await;
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect("Session state mutex was poisoned");
             state.pending_approvals.insert(sub_id, tx_approve);
         }
         rx_approve
     }
 
     pub fn notify_approval(&self, sub_id: &str, decision: ReviewDecision) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("Session state mutex was poisoned");
         if let Some(tx_approve) = state.pending_approvals.remove(sub_id) {
             tx_approve.send(decision).ok();
         }
-    }
-
-    pub fn add_approved_command(&self, cmd: Vec<String>) {
-        let mut state = self.state.lock().unwrap();
-        state.approved_commands.insert(cmd);
     }
 
     /// Records items to both the rollout and the chat completions/ZDR
@@ -308,7 +271,7 @@ impl Session {
         debug!("Recording items for conversation: {items:?}");
         self.record_rollout_items(items).await;
 
-        if let Some(transcript) = self.state.lock().unwrap().zdr_transcript.as_mut() {
+        if let Some(transcript) = self.state.lock().expect("Session state mutex was poisoned").zdr_transcript.as_mut() {
             transcript.record_items(items);
         }
     }
@@ -319,7 +282,7 @@ impl Session {
         // Clone the recorder outside of the mutex so we don't hold the lock
         // across an await point (MutexGuard is not Send).
         let recorder = {
-            let guard = self.rollout.lock().unwrap();
+            let guard = self.rollout.lock().expect("Rollout mutex was poisoned");
             guard.as_ref().cloned()
         };
 
@@ -516,6 +479,10 @@ async fn submission_loop(
     tx_event: Sender<Event>,
     ctrl_c: Arc<Notify>,
 ) {
+    crate::debug_log!("[SUBMISSION_LOOP] Starting submission loop");
+    crate::debug_log!("[SUBMISSION_LOOP] Config model: {}", config.model);
+    crate::debug_log!("[SUBMISSION_LOOP] Config provider: {}", config.model_provider_id);
+    
     // Generate a unique ID for the lifetime of this Codex session.
     let session_id = Uuid::new_v4();
 
@@ -533,13 +500,21 @@ async fn submission_loop(
     };
 
     loop {
+        crate::debug_log!("[SUBMISSION_LOOP] Waiting for next submission...");
         let interrupted = ctrl_c.notified();
         let sub = tokio::select! {
             res = rx_sub.recv() => match res {
-                Ok(sub) => sub,
-                Err(_) => break,
+                Ok(sub) => {
+                    crate::debug_log!("[SUBMISSION_LOOP] Received submission with id: {}", sub.id);
+                    sub
+                },
+                Err(_) => {
+                    crate::debug_log!("[SUBMISSION_LOOP] Submission channel closed, breaking");
+                    break
+                },
             },
             _ = interrupted => {
+                crate::debug_log!("[SUBMISSION_LOOP] Interrupted by Ctrl+C");
                 if let Some(sess) = sess.as_ref(){
                     sess.abort();
                 }
@@ -548,6 +523,32 @@ async fn submission_loop(
         };
 
         debug!(?sub, "Submission");
+        
+        // DEBUG: Log Op processing
+        if std::env::var("CODEX_DEBUG").is_ok() {
+            match &sub.op {
+                Op::UserInput { items } => {
+                    eprintln!("[DEBUG CORE] Processing Op::UserInput with {} items", items.len());
+                    for (i, item) in items.iter().enumerate() {
+                        match item {
+                            crate::protocol::InputItem::Text { text } => {
+                                eprintln!("[DEBUG CORE] Item {}: Text = '{}'", i, text);
+                            }
+                            crate::protocol::InputItem::LocalImage { path } => {
+                                eprintln!("[DEBUG CORE] Item {}: LocalImage = {:?}", i, path);
+                            }
+                            crate::protocol::InputItem::Image { .. } => {
+                                eprintln!("[DEBUG CORE] Item {}: Image", i);
+                            }
+                        }
+                    }
+                }
+                op => {
+                    eprintln!("[DEBUG CORE] Processing Op: {:?}", std::mem::discriminant(op));
+                }
+            }
+        }
+        
         match sub.op {
             Op::Interrupt => {
                 let sess = match sess.as_ref() {
@@ -566,7 +567,6 @@ async fn submission_loop(
                 model_reasoning_summary,
                 instructions,
                 approval_policy,
-                sandbox_policy,
                 disable_response_storage,
                 notify,
                 cwd,
@@ -664,7 +664,6 @@ async fn submission_loop(
                     ctrl_c: Arc::clone(&ctrl_c),
                     instructions,
                     approval_policy,
-                    sandbox_policy,
                     shell_environment_policy: config.shell_environment_policy.clone(),
                     cwd,
                     writable_roots,
@@ -672,7 +671,6 @@ async fn submission_loop(
                     notify,
                     state: Mutex::new(state),
                     rollout: Mutex::new(rollout_recorder),
-                    codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
                 }));
 
                 // Gather history metadata for SessionConfiguredEvent.
@@ -708,6 +706,9 @@ async fn submission_loop(
                 // attempt to inject input into current task
                 if let Err(items) = sess.inject_input(items) {
                     // no current task, spawn a new one
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG CORE] No current task, spawning new AgentTask for {} items", items.len());
+                    }
                     let task = AgentTask::spawn(Arc::clone(sess), sub.id, items);
                     sess.set_task(task);
                 }
@@ -801,9 +802,28 @@ async fn submission_loop(
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the task complete.
 async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
+    crate::debug_log!("[RUN_TASK] run_task started with sub_id: {}", sub_id);
+    
     if input.is_empty() {
+        crate::debug_log!("[RUN_TASK] Input is empty, returning");
         return;
     }
+    
+    crate::debug_log!("[RUN_TASK] Processing {} input items", input.len());
+    for (i, item) in input.iter().enumerate() {
+        match item {
+            InputItem::Text { text } => {
+                crate::debug_log!("[RUN_TASK] Input {}: Text = '{}'", i, text);
+            }
+            InputItem::LocalImage { path } => {
+                crate::debug_log!("[RUN_TASK] Input {}: LocalImage = {:?}", i, path);
+            }
+            InputItem::Image { .. } => {
+                crate::debug_log!("[RUN_TASK] Input {}: Image", i);
+            }
+        }
+    }
+    
     let event = Event {
         id: sub_id.clone(),
         msg: EventMsg::TaskStarted,
@@ -877,8 +897,11 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                 })
             })
             .collect();
+        crate::debug_log!("[RUN_TASK] Calling run_turn with {} items", turn_input.len());
+        
         match run_turn(&sess, sub_id.clone(), turn_input).await {
             Ok(turn_output) => {
+                crate::debug_log!("[RUN_TASK] run_turn completed with {} output items", turn_output.len());
                 let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
                 let mut responses = Vec::<ResponseInputItem>::new();
                 for processed_response_item in turn_output {
@@ -1069,6 +1092,9 @@ async fn try_run_turn(
     sub_id: &str,
     prompt: &Prompt,
 ) -> CodexResult<Vec<ProcessedResponseItem>> {
+    crate::debug_log!("[TRY_RUN_TURN] Starting try_run_turn for sub_id: {}", sub_id);
+    crate::debug_log!("[TRY_RUN_TURN] Prompt has {} input items", prompt.input.len());
+    
     // call_ids that are part of this response.
     let completed_call_ids = prompt
         .input
@@ -1119,13 +1145,45 @@ async fn try_run_turn(
         })
     };
 
+    crate::debug_log!("[TRY_RUN_TURN] Creating stream for model API call...");
+    crate::debug_log!("[TRY_RUN_TURN] About to call sess.client.stream()");
+    
     let mut stream = sess.client.clone().stream(&prompt).await?;
+    crate::debug_log!("[TRY_RUN_TURN] Stream created successfully");
 
     // Buffer all the incoming messages from the stream first, then execute them.
     // If we execute a function call in the middle of handling the stream, it can time out.
     let mut input = Vec::new();
     while let Some(event) = stream.next().await {
-        input.push(event?);
+        let event = event?;
+        if std::env::var("CODEX_DEBUG").is_ok() {
+            match &event {
+                ResponseEvent::OutputItemDone(item) => {
+                    match item {
+                        ResponseItem::FunctionCall { name, call_id, .. } => {
+                            eprintln!("[DEBUG CORE] Stream received FunctionCall: '{}' (call_id: {})", name, call_id);
+                        }
+                        ResponseItem::Message { .. } => {
+                            eprintln!("[DEBUG CORE] Stream received Message");
+                        }
+                        _ => {
+                            eprintln!("[DEBUG CORE] Stream received: {:?}", std::mem::discriminant(item));
+                        }
+                    }
+                }
+                ResponseEvent::Created => {
+                    eprintln!("[DEBUG CORE] Stream event: Created");
+                }
+                ResponseEvent::Completed { .. } => {
+                    eprintln!("[DEBUG CORE] Stream event: Completed");
+                }
+            }
+        }
+        input.push(event);
+    }
+    
+    if std::env::var("CODEX_DEBUG").is_ok() {
+        eprintln!("[DEBUG CORE] Stream ended with {} events", input.len());
     }
 
     let mut output = Vec::new();
@@ -1183,6 +1241,24 @@ async fn handle_response_item(
     item: ResponseItem,
 ) -> CodexResult<Option<ResponseInputItem>> {
     debug!(?item, "Output item");
+    
+    if std::env::var("CODEX_DEBUG").is_ok() {
+        match &item {
+            ResponseItem::Message { content, .. } => {
+                eprintln!("[DEBUG CORE] handle_response_item: Message with {} content items", content.len());
+            }
+            ResponseItem::FunctionCall { name, call_id, .. } => {
+                eprintln!("[DEBUG CORE] handle_response_item: FunctionCall '{}' (call_id: {})", name, call_id);
+            }
+            ResponseItem::LocalShellCall { call_id, .. } => {
+                eprintln!("[DEBUG CORE] handle_response_item: LocalShellCall (call_id: {:?})", call_id);
+            }
+            _ => {
+                eprintln!("[DEBUG CORE] handle_response_item: {:?}", std::mem::discriminant(&item));
+            }
+        }
+    }
+    
     let output = match item {
         ResponseItem::Message { content, .. } => {
             for item in content {
@@ -1272,11 +1348,24 @@ async fn handle_function_call(
     arguments: String,
     call_id: String,
 ) -> ResponseInputItem {
+    // DEBUG: Log the function call details for compatibility analysis
+    if std::env::var("CODEX_DEBUG").is_ok() {
+        eprintln!("[DEBUG CORE] Function call received - name: '{}', call_id: '{}'", name, call_id);
+        eprintln!("[DEBUG CORE] Function arguments: {}", arguments);
+    }
+    
     match name.as_str() {
-        "container.exec" | "shell" => {
+        // Support various common shell tool names for better compatibility
+        "container.exec" | "shell" | "bash" | "run_shell" | "execute" | "exec" => {
+            if std::env::var("CODEX_DEBUG").is_ok() {
+                eprintln!("[DEBUG CORE] Routing to built-in shell handler (tool: '{}')", name);
+            }
             let params = match parse_container_exec_arguments(arguments, sess, &call_id) {
                 Ok(params) => params,
                 Err(output) => {
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG CORE] Shell argument parsing failed");
+                    }
                     return output;
                 }
             };
@@ -1285,6 +1374,9 @@ async fn handle_function_call(
         _ => {
             match try_parse_fully_qualified_tool_name(&name) {
                 Some((server, tool_name)) => {
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG CORE] Routing to MCP tool - server: '{}', tool: '{}'", server, tool_name);
+                    }
                     // TODO(mbolin): Determine appropriate timeout for tool call.
                     let timeout = None;
                     handle_mcp_tool_call(
@@ -1293,12 +1385,36 @@ async fn handle_function_call(
                     .await
                 }
                 None => {
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG CORE] Unknown tool name '{}' - checking for fallback options", name);
+                    }
+                    
+                    // Try to handle unknown tool names with intelligent fallbacks
+                    if name.contains("shell") || name.contains("exec") || name.contains("run") || name.contains("command") {
+                        if std::env::var("CODEX_DEBUG").is_ok() {
+                            eprintln!("[DEBUG CORE] Tool name '{}' looks like a shell command, attempting shell fallback", name);
+                        }
+                        let params = match parse_container_exec_arguments(arguments, sess, &call_id) {
+                            Ok(params) => params,
+                            Err(output) => {
+                                if std::env::var("CODEX_DEBUG").is_ok() {
+                                    eprintln!("[DEBUG CORE] Shell fallback argument parsing failed");
+                                }
+                                return output;
+                            }
+                        };
+                        return handle_container_exec_with_params(params, sess, sub_id, call_id).await;
+                    }
+                    
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG CORE] No fallback available for tool '{}' - returning error", name);
+                    }
                     // Unknown function: reply with structured failure so the model can adapt.
                     ResponseInputItem::FunctionCallOutput {
                         call_id,
                         output: FunctionCallOutputPayload {
-                            content: format!("unsupported call: {name}"),
-                            success: None,
+                            content: format!("Unsupported tool: '{}'. Available tools: shell, container.exec, or MCP tools with fully qualified names (server.tool_name)", name),
+                            success: Some(false),
                         },
                     }
                 }
@@ -1321,21 +1437,87 @@ fn parse_container_exec_arguments(
     sess: &Session,
     call_id: &str,
 ) -> Result<ExecParams, ResponseInputItem> {
-    // parse command
+    if std::env::var("CODEX_DEBUG").is_ok() {
+        eprintln!("[DEBUG CORE] Parsing shell arguments: {}", arguments);
+    }
+    
+    // Try standard format first
     match serde_json::from_str::<ShellToolCallParams>(&arguments) {
-        Ok(shell_tool_call_params) => Ok(to_exec_params(shell_tool_call_params, sess)),
+        Ok(shell_tool_call_params) => {
+            if std::env::var("CODEX_DEBUG").is_ok() {
+                eprintln!("[DEBUG CORE] Successfully parsed standard shell tool call params");
+            }
+            return Ok(to_exec_params(shell_tool_call_params, sess));
+        }
         Err(e) => {
-            // allow model to re-sample
-            let output = ResponseInputItem::FunctionCallOutput {
-                call_id: call_id.to_string(),
-                output: FunctionCallOutputPayload {
-                    content: format!("failed to parse function arguments: {e}"),
-                    success: None,
-                },
-            };
-            Err(output)
+            if std::env::var("CODEX_DEBUG").is_ok() {
+                eprintln!("[DEBUG CORE] Standard parsing failed: {}, trying fallback formats", e);
+            }
         }
     }
+    
+    // Try to parse as a raw JSON object and extract command in various formats
+    if let Ok(json_obj) = serde_json::from_str::<serde_json::Value>(&arguments) {
+        if std::env::var("CODEX_DEBUG").is_ok() {
+            eprintln!("[DEBUG CORE] Parsed as JSON object, looking for command field");
+        }
+        
+        if let Some(command_value) = json_obj.get("command") {
+            let command = match command_value {
+                serde_json::Value::Array(arr) => {
+                    // Standard format: ["ls", "-la"]
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<String>>()
+                }
+                serde_json::Value::String(s) => {
+                    // String format: "ls -la" -> split into args
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG CORE] Command is a string, splitting: '{}'", s);
+                    }
+                    shell_words::split(s).unwrap_or_else(|_| vec![s.clone()])
+                }
+                _ => {
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG CORE] Command field has unexpected type");
+                    }
+                    return Err(ResponseInputItem::FunctionCallOutput {
+                        call_id: call_id.to_string(),
+                        output: FunctionCallOutputPayload {
+                            content: format!("command field must be string or array, got: {:?}", command_value),
+                            success: Some(false),
+                        },
+                    });
+                }
+            };
+            
+            if !command.is_empty() {
+                if std::env::var("CODEX_DEBUG").is_ok() {
+                    eprintln!("[DEBUG CORE] Successfully extracted command: {:?}", command);
+                }
+                let params = ExecParams {
+                    command,
+                    cwd: sess.cwd.clone(),
+                    timeout_ms: None,
+                    env: create_env(&sess.shell_environment_policy),
+                };
+                return Ok(params);
+            }
+        }
+    }
+    
+    // Final fallback: treat the entire arguments string as a command
+    if std::env::var("CODEX_DEBUG").is_ok() {
+        eprintln!("[DEBUG CORE] All parsing attempts failed, treating arguments as direct command");
+    }
+    let output = ResponseInputItem::FunctionCallOutput {
+        call_id: call_id.to_string(),
+        output: FunctionCallOutputPayload {
+            content: format!("Failed to parse shell arguments. Expected format: {{\"command\": [\"ls\", \"-la\"]}} or {{\"command\": \"ls -la\"}}. Got: {}", arguments),
+            success: Some(false),
+        },
+    };
+    Err(output)
 }
 
 async fn handle_container_exec_with_params(
@@ -1373,50 +1555,12 @@ async fn handle_container_exec_with_params(
         assess_command_safety(
             &params.command,
             sess.approval_policy,
-            &sess.sandbox_policy,
             &state.approved_commands,
         )
     };
-    let sandbox_type = match safety {
-        SafetyCheck::AutoApprove { sandbox_type } => sandbox_type,
-        SafetyCheck::AskUser => {
-            let rx_approve = sess
-                .request_command_approval(
-                    sub_id.clone(),
-                    params.command.clone(),
-                    params.cwd.clone(),
-                    None,
-                )
-                .await;
-            match rx_approve.await.unwrap_or_default() {
-                ReviewDecision::Approved => (),
-                ReviewDecision::ApprovedForSession => {
-                    sess.add_approved_command(params.command.clone());
-                }
-                ReviewDecision::Denied | ReviewDecision::Abort => {
-                    return ResponseInputItem::FunctionCallOutput {
-                        call_id,
-                        output: FunctionCallOutputPayload {
-                            content: "exec command rejected by user".to_string(),
-                            success: None,
-                        },
-                    };
-                }
-            }
-            // No sandboxing is applied because the user has given
-            // explicit approval. Often, we end up in this case because
-            // the command cannot be run in a sandbox, such as
-            // installing a new dependency that requires network access.
-            SandboxType::None
-        }
-        SafetyCheck::Reject { reason } => {
-            return ResponseInputItem::FunctionCallOutput {
-                call_id,
-                output: FunctionCallOutputPayload {
-                    content: format!("exec command rejected: {reason}"),
-                    success: None,
-                },
-            };
+    match safety {
+        SafetyCheck::AutoApprove => {
+            // Command automatically approved, execute directly
         }
     };
 
@@ -1425,10 +1569,7 @@ async fn handle_container_exec_with_params(
 
     let output_result = process_exec_tool_call(
         params.clone(),
-        sandbox_type,
         sess.ctrl_c.clone(),
-        &sess.sandbox_policy,
-        &sess.codex_linux_sandbox_exe,
     )
     .await;
 
@@ -1438,7 +1579,7 @@ async fn handle_container_exec_with_params(
                 exit_code,
                 stdout,
                 stderr,
-                duration,
+                duration_seconds,
             } = output;
 
             sess.notify_exec_command_end(&sub_id, &call_id, &stdout, &stderr, exit_code)
@@ -1448,7 +1589,7 @@ async fn handle_container_exec_with_params(
             let content = format_exec_output(
                 if is_success { &stdout } else { &stderr },
                 exit_code,
-                duration,
+                duration_seconds,
             );
 
             ResponseInputItem::FunctionCallOutput {
@@ -1460,7 +1601,14 @@ async fn handle_container_exec_with_params(
             }
         }
         Err(CodexErr::Sandbox(error)) => {
-            handle_sandbox_error(error, sandbox_type, params, sess, sub_id, call_id).await
+            // Since sandbox is disabled, treat as generic error
+            ResponseInputItem::FunctionCallOutput {
+                call_id,
+                output: FunctionCallOutputPayload {
+                    content: format!("Command failed: {}", error),
+                    success: None,
+                },
+            }
         }
         Err(e) => {
             // Handle non-sandbox errors
@@ -1468,132 +1616,6 @@ async fn handle_container_exec_with_params(
                 call_id,
                 output: FunctionCallOutputPayload {
                     content: format!("execution error: {e}"),
-                    success: None,
-                },
-            }
-        }
-    }
-}
-
-async fn handle_sandbox_error(
-    error: SandboxErr,
-    sandbox_type: SandboxType,
-    params: ExecParams,
-    sess: &Session,
-    sub_id: String,
-    call_id: String,
-) -> ResponseInputItem {
-    // Early out if the user never wants to be asked for approval; just return to the model immediately
-    if sess.approval_policy == AskForApproval::Never {
-        return ResponseInputItem::FunctionCallOutput {
-            call_id,
-            output: FunctionCallOutputPayload {
-                content: format!(
-                    "failed in sandbox {sandbox_type:?} with execution error: {error}"
-                ),
-                success: Some(false),
-            },
-        };
-    }
-
-    // Note that when `error` is `SandboxErr::Denied`, it could be a false
-    // positive. That is, it may have exited with a non-zero exit code, not
-    // because the sandbox denied it, but because that is its expected behavior,
-    // i.e., a grep command that did not match anything. Ideally we would
-    // include additional metadata on the command to indicate whether non-zero
-    // exit codes merit a retry.
-
-    // For now, we categorically ask the user to retry without sandbox.
-    sess.notify_background_event(&sub_id, format!("Execution failed: {error}"))
-        .await;
-
-    let rx_approve = sess
-        .request_command_approval(
-            sub_id.clone(),
-            params.command.clone(),
-            params.cwd.clone(),
-            Some("command failed; retry without sandbox?".to_string()),
-        )
-        .await;
-
-    match rx_approve.await.unwrap_or_default() {
-        ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
-            // Persist this command as pre‑approved for the
-            // remainder of the session so future
-            // executions skip the sandbox directly.
-            // TODO(ragona): Isn't this a bug? It always saves the command in an | fork?
-            sess.add_approved_command(params.command.clone());
-            // Inform UI we are retrying without sandbox.
-            sess.notify_background_event(&sub_id, "retrying command without sandbox")
-                .await;
-
-            // Emit a fresh Begin event so progress bars reset.
-            let retry_call_id = format!("{call_id}-retry");
-            sess.notify_exec_command_begin(&sub_id, &retry_call_id, &params)
-                .await;
-
-            // This is an escalated retry; the policy will not be
-            // examined and the sandbox has been set to `None`.
-            let retry_output_result = process_exec_tool_call(
-                params,
-                SandboxType::None,
-                sess.ctrl_c.clone(),
-                &sess.sandbox_policy,
-                &sess.codex_linux_sandbox_exe,
-            )
-            .await;
-
-            match retry_output_result {
-                Ok(retry_output) => {
-                    let ExecToolCallOutput {
-                        exit_code,
-                        stdout,
-                        stderr,
-                        duration,
-                    } = retry_output;
-
-                    sess.notify_exec_command_end(
-                        &sub_id,
-                        &retry_call_id,
-                        &stdout,
-                        &stderr,
-                        exit_code,
-                    )
-                    .await;
-
-                    let is_success = exit_code == 0;
-                    let content = format_exec_output(
-                        if is_success { &stdout } else { &stderr },
-                        exit_code,
-                        duration,
-                    );
-
-                    ResponseInputItem::FunctionCallOutput {
-                        call_id,
-                        output: FunctionCallOutputPayload {
-                            content,
-                            success: Some(is_success),
-                        },
-                    }
-                }
-                Err(e) => {
-                    // Handle retry failure
-                    ResponseInputItem::FunctionCallOutput {
-                        call_id,
-                        output: FunctionCallOutputPayload {
-                            content: format!("retry failed: {e}"),
-                            success: None,
-                        },
-                    }
-                }
-            }
-        }
-        ReviewDecision::Denied | ReviewDecision::Abort => {
-            // Fall through to original failure handling.
-            ResponseInputItem::FunctionCallOutput {
-                call_id,
-                output: FunctionCallOutputPayload {
-                    content: "exec command rejected by user".to_string(),
                     success: None,
                 },
             }
@@ -1618,34 +1640,9 @@ async fn apply_patch(
         &writable_roots_snapshot,
         &sess.cwd,
     ) {
-        SafetyCheck::AutoApprove { .. } => true,
-        SafetyCheck::AskUser => {
-            // Compute a readable summary of path changes to include in the
-            // approval request so the user can make an informed decision.
-            let rx_approve = sess
-                .request_patch_approval(sub_id.clone(), &action, None, None)
-                .await;
-            match rx_approve.await.unwrap_or_default() {
-                ReviewDecision::Approved | ReviewDecision::ApprovedForSession => false,
-                ReviewDecision::Denied | ReviewDecision::Abort => {
-                    return ResponseInputItem::FunctionCallOutput {
-                        call_id,
-                        output: FunctionCallOutputPayload {
-                            content: "patch rejected by user".to_string(),
-                            success: Some(false),
-                        },
-                    };
-                }
-            }
-        }
-        SafetyCheck::Reject { reason } => {
-            return ResponseInputItem::FunctionCallOutput {
-                call_id,
-                output: FunctionCallOutputPayload {
-                    content: format!("patch rejected: {reason}"),
-                    success: Some(false),
-                },
-            };
+        SafetyCheck::AutoApprove => {
+            // Patches are automatically approved
+            true
         }
     };
 
@@ -1973,7 +1970,7 @@ fn get_writable_roots(cwd: &Path) -> Vec<PathBuf> {
 }
 
 /// Exec output is a pre-serialized JSON payload
-fn format_exec_output(output: &str, exit_code: i32, duration: Duration) -> String {
+fn format_exec_output(output: &str, exit_code: i32, duration_seconds: f64) -> String {
     #[derive(Serialize)]
     struct ExecMetadata {
         exit_code: i32,
@@ -1987,13 +1984,13 @@ fn format_exec_output(output: &str, exit_code: i32, duration: Duration) -> Strin
     }
 
     // round to 1 decimal place
-    let duration_seconds = ((duration.as_secs_f32()) * 10.0).round() / 10.0;
+    let duration_secs_f32 = ((duration_seconds as f32) * 10.0).round() / 10.0;
 
     let payload = ExecOutput {
         output,
         metadata: ExecMetadata {
             exit_code,
-            duration_seconds,
+            duration_seconds: duration_secs_f32,
         },
     };
 

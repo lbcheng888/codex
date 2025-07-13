@@ -4,9 +4,7 @@
 //! between user and agent.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use mcp_types::CallToolResult;
 use serde::Deserialize;
@@ -48,8 +46,6 @@ pub enum Op {
         instructions: Option<String>,
         /// When to escalate for approval for execution
         approval_policy: AskForApproval,
-        /// How to sandbox commands executed in the system
-        sandbox_policy: SandboxPolicy,
         /// Disable server-side response storage (send full context each request)
         #[serde(default)]
         disable_response_storage: bool,
@@ -131,106 +127,6 @@ pub enum AskForApproval {
     /// Never ask the user to approve commands. Failures are immediately returned
     /// to the model, and never escalated to the user for approval.
     Never,
-}
-
-/// Determines execution restrictions for model shell commands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "kebab-case")]
-pub enum SandboxPolicy {
-    /// No restrictions whatsoever. Use with caution.
-    #[serde(rename = "danger-full-access")]
-    DangerFullAccess,
-
-    /// Read-only access to the entire file-system.
-    #[serde(rename = "read-only")]
-    ReadOnly,
-
-    /// Same as `ReadOnly` but additionally grants write access to the current
-    /// working directory ("workspace").
-    #[serde(rename = "workspace-write")]
-    WorkspaceWrite {
-        /// Additional folders (beyond cwd and possibly TMPDIR) that should be
-        /// writable from within the sandbox.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        writable_roots: Vec<PathBuf>,
-
-        /// When set to `true`, outbound network access is allowed. `false` by
-        /// default.
-        #[serde(default)]
-        network_access: bool,
-    },
-}
-
-impl FromStr for SandboxPolicy {
-    type Err = serde_json::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(s)
-    }
-}
-
-impl SandboxPolicy {
-    /// Returns a policy with read-only disk access and no network.
-    pub fn new_read_only_policy() -> Self {
-        SandboxPolicy::ReadOnly
-    }
-
-    /// Returns a policy that can read the entire disk, but can only write to
-    /// the current working directory and the per-user tmp dir on macOS. It does
-    /// not allow network access.
-    pub fn new_workspace_write_policy() -> Self {
-        SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![],
-            network_access: false,
-        }
-    }
-
-    /// Always returns `true` for now, as we do not yet support restricting read
-    /// access.
-    pub fn has_full_disk_read_access(&self) -> bool {
-        true
-    }
-
-    pub fn has_full_disk_write_access(&self) -> bool {
-        match self {
-            SandboxPolicy::DangerFullAccess => true,
-            SandboxPolicy::ReadOnly => false,
-            SandboxPolicy::WorkspaceWrite { .. } => false,
-        }
-    }
-
-    pub fn has_full_network_access(&self) -> bool {
-        match self {
-            SandboxPolicy::DangerFullAccess => true,
-            SandboxPolicy::ReadOnly => false,
-            SandboxPolicy::WorkspaceWrite { network_access, .. } => *network_access,
-        }
-    }
-
-    /// Returns the list of writable roots that should be passed down to the
-    /// Landlock rules installer, tailored to the current working directory.
-    pub fn get_writable_roots_with_cwd(&self, cwd: &Path) -> Vec<PathBuf> {
-        match self {
-            SandboxPolicy::DangerFullAccess => Vec::new(),
-            SandboxPolicy::ReadOnly => Vec::new(),
-            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-                let mut roots = writable_roots.clone();
-                roots.push(cwd.to_path_buf());
-
-                // Also include the per-user tmp dir on macOS.
-                // Note this is added dynamically rather than storing it in
-                // writable_roots because writable_roots contains only static
-                // values deserialized from the config file.
-                if cfg!(target_os = "macos") {
-                    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-                        roots.push(PathBuf::from(tmpdir));
-                    }
-                }
-
-                roots
-            }
-        }
-    }
 }
 
 /// User input

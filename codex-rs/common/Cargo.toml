@@ -11,9 +11,13 @@ clap = { version = "4", features = ["derive", "wrap_help"], optional = true }
 codex-core = { path = "../core" }
 toml = { version = "0.9", optional = true }
 serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
+anyhow = { version = "1", optional = true }
+tokio = { version = "1", features = ["fs"], optional = true }
 
 [features]
 # Separate feature so that `clap` is not a mandatory dependency.
 cli = ["clap", "toml", "serde"]
 elapsed = []
-sandbox_summary = []
+io-utils = ["anyhow", "tokio"]
+json-utils = ["serde_json", "anyhow", "serde"]

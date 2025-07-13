@@ -5,7 +5,7 @@ use clap::ArgAction;
 use clap::Parser;
 
 /// Fuzzy matches filenames under a directory.
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(version)]
 pub struct Cli {
     /// Whether to output results in JSON format.

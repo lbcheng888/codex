@@ -5,7 +5,6 @@
 use app::App;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
-use codex_core::config_types::SandboxMode;
 use codex_core::openai_api_key::OPENAI_API_KEY_ENV_VAR;
 use codex_core::openai_api_key::get_openai_api_key;
 use codex_core::openai_api_key::set_openai_api_key;
@@ -33,36 +32,30 @@ mod file_search;
 mod get_git_diff;
 mod git_warning_screen;
 mod history_cell;
+mod keyboard_help_widget;
 mod log_layer;
 mod login_screen;
 mod markdown;
 mod mouse_capture;
 mod scroll_event_helper;
 mod slash_command;
+mod status_bar;
 mod status_indicator_widget;
 mod text_block;
 mod text_formatting;
+mod theme;
 mod tui;
 mod user_approval_widget;
 
 pub use cli::Cli;
 
-pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::Result<()> {
-    let (sandbox_mode, approval_policy) = if cli.full_auto {
-        (
-            Some(SandboxMode::WorkspaceWrite),
-            Some(AskForApproval::OnFailure),
-        )
+pub fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::Result<()> {
+    let approval_policy = if cli.full_auto {
+        Some(AskForApproval::OnFailure)
     } else if cli.dangerously_bypass_approvals_and_sandbox {
-        (
-            Some(SandboxMode::DangerFullAccess),
-            Some(AskForApproval::Never),
-        )
+        Some(AskForApproval::Never)
     } else {
-        (
-            cli.sandbox_mode.map(Into::<SandboxMode>::into),
-            cli.approval_policy.map(Into::into),
-        )
+        cli.approval_policy.map(Into::into)
     };
 
     let config = {
@@ -70,11 +63,9 @@ pub fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> std::io::
         let overrides = ConfigOverrides {
             model: cli.model.clone(),
             approval_policy,
-            sandbox_mode,
             cwd: cli.cwd.clone().map(|p| p.canonicalize().unwrap_or(p)),
             model_provider: None,
             config_profile: cli.config_profile.clone(),
-            codex_linux_sandbox_exe,
         };
         // Parse `-c` overrides from the CLI.
         let cli_kv_overrides = match cli.config_overrides.parse_overrides() {

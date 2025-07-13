@@ -2,6 +2,7 @@ use crate::cell_widget::CellWidget;
 use crate::history_cell::CommandOutput;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PatchEventType;
+use crate::theme::Theme;
 use codex_core::config::Config;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::SessionConfiguredEvent;
@@ -33,10 +34,17 @@ pub struct ConversationHistoryWidget {
     /// The height of the viewport last time render_ref() was called
     last_viewport_height: StdCell<usize>,
     has_input_focus: bool,
+    /// Theme for consistent styling
+    theme: Theme,
 }
 
 impl ConversationHistoryWidget {
+    #[allow(dead_code)]
     pub fn new() -> Self {
+        Self::with_theme(Theme::default())
+    }
+
+    pub fn with_theme(theme: Theme) -> Self {
         Self {
             entries: Vec::new(),
             cached_width: StdCell::new(0),
@@ -44,6 +52,7 @@ impl ConversationHistoryWidget {
             num_rendered_lines: StdCell::new(0),
             last_viewport_height: StdCell::new(0),
             has_input_focus: false,
+            theme,
         }
     }
 
@@ -325,24 +334,8 @@ impl ConversationHistoryWidget {
 
 impl WidgetRef for ConversationHistoryWidget {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let (title, border_style) = if self.has_input_focus {
-            (
-                "Messages (↑/↓ or j/k = line,  b/space = page)",
-                Style::default().fg(Color::LightYellow),
-            )
-        } else {
-            ("Messages (tab to focus)", Style::default().dim())
-        };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(border_style);
-
-        // Compute the inner area that will be available for the list after
-        // the surrounding `Block` is drawn.
-        let inner = block.inner(area);
+        // No border for conversation history - use the full area
+        let inner = area;
         let viewport_height = inner.height as usize;
 
         // Cache (and if necessary recalculate) the wrapped line counts for every
@@ -383,17 +376,15 @@ impl WidgetRef for ConversationHistoryWidget {
         // ------------------------------------------------------------------
         // Render order:
         //   1. Clear full widget area (avoid artifacts from prior frame).
-        //   2. Draw the surrounding Block (border and title).
-        //   3. Render *each* visible HistoryCell into its own sub-Rect while
+        //   2. Render *each* visible HistoryCell into its own sub-Rect while
         //      respecting partial visibility at the top and bottom.
-        //   4. Draw the scrollbar track / thumb in the reserved column.
+        //   3. Draw the scrollbar track / thumb in the reserved column.
         // ------------------------------------------------------------------
 
         // Clear entire widget area first.
         Clear.render(area, buf);
 
-        // Draw border + title.
-        block.render(area, buf);
+        // No border to render - proceed directly to content
 
         // ------------------------------------------------------------------
         // Calculate which cells are visible for the current scroll position
@@ -458,9 +449,9 @@ impl WidgetRef for ConversationHistoryWidget {
             // a low-contrast thumb so the scrollbar fades into the background without becoming
             // invisible.
             let thumb_style = if self.has_input_focus {
-                Style::reset().fg(Color::LightYellow)
+                Style::reset().fg(self.theme.ui.highlight)
             } else {
-                Style::reset().fg(Color::Gray)
+                Style::reset().fg(self.theme.ui.border_unfocused)
             };
 
             // By default the Scrollbar widget inherits any style that was
@@ -473,12 +464,12 @@ impl WidgetRef for ConversationHistoryWidget {
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(Some("↑"))
                     .end_symbol(Some("↓"))
-                    .begin_style(Style::reset().fg(Color::DarkGray))
-                    .end_style(Style::reset().fg(Color::DarkGray))
+                    .begin_style(Style::reset().fg(self.theme.ui.border_unfocused))
+                    .end_style(Style::reset().fg(self.theme.ui.border_unfocused))
                     .thumb_symbol("█")
                     .thumb_style(thumb_style)
                     .track_symbol(Some("│"))
-                    .track_style(Style::reset().fg(Color::DarkGray)),
+                    .track_style(Style::reset().fg(self.theme.ui.border_unfocused)),
                 inner,
                 buf,
                 &mut scroll_state,
@@ -495,5 +486,5 @@ impl WidgetRef for ConversationHistoryWidget {
 /// they stay in sync.
 #[inline]
 pub(crate) const fn wrap_cfg() -> ratatui::widgets::Wrap {
-    ratatui::widgets::Wrap { trim: false }
+    ratatui::widgets::Wrap { trim: true }
 }

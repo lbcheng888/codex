@@ -3,8 +3,6 @@ use crate::config_types::History;
 use crate::config_types::McpServerConfig;
 use crate::config_types::ReasoningEffort;
 use crate::config_types::ReasoningSummary;
-use crate::config_types::SandboxMode;
-use crate::config_types::SandboxWorkplaceWrite;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::config_types::ShellEnvironmentPolicyToml;
 use crate::config_types::Tui;
@@ -14,7 +12,6 @@ use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;
 use crate::openai_model_info::get_model_info;
 use crate::protocol::AskForApproval;
-use crate::protocol::SandboxPolicy;
 use dirs::home_dir;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -47,8 +44,6 @@ pub struct Config {
 
     /// Approval policy for executing commands.
     pub approval_policy: AskForApproval,
-
-    pub sandbox_policy: SandboxPolicy,
 
     pub shell_environment_policy: ShellEnvironmentPolicy,
 
@@ -121,7 +116,6 @@ pub struct Config {
     /// [`ConfigOverrides`].
     ///
     /// When this program is invoked, arg0 will be set to `codex-linux-sandbox`.
-    pub codex_linux_sandbox_exe: Option<PathBuf>,
 
     /// If not "none", the value to use for `reasoning.effort` when making a
     /// request using the Responses API.
@@ -150,6 +144,8 @@ impl Config {
         cli_overrides: Vec<(String, TomlValue)>,
         overrides: ConfigOverrides,
     ) -> std::io::Result<Self> {
+        crate::debug_log!("[CONFIG] Loading config with overrides: {:?}", overrides);
+        
         // Resolve the directory that stores Codex state (e.g. ~/.codex or the
         // value of $CODEX_HOME) so we can embed it into the resulting
         // `Config` instance.
@@ -262,11 +258,6 @@ pub struct ConfigToml {
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
 
-    /// Sandbox mode to use.
-    pub sandbox_mode: Option<SandboxMode>,
-
-    /// Sandbox configuration to apply if `sandbox` is `WorkspaceWrite`.
-    pub sandbox_workspace_write: Option<SandboxWorkplaceWrite>,
 
     /// Disable server-side response storage (sends the full conversation
     /// context with every request). Currently necessary for OpenAI customers
@@ -323,25 +314,7 @@ pub struct ConfigToml {
     pub chatgpt_base_url: Option<String>,
 }
 
-impl ConfigToml {
-    /// Derive the effective sandbox policy from the configuration.
-    fn derive_sandbox_policy(&self, sandbox_mode_override: Option<SandboxMode>) -> SandboxPolicy {
-        let resolved_sandbox_mode = sandbox_mode_override
-            .or(self.sandbox_mode)
-            .unwrap_or_default();
-        match resolved_sandbox_mode {
-            SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
-            SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
-                Some(s) => SandboxPolicy::WorkspaceWrite {
-                    writable_roots: s.writable_roots.clone(),
-                    network_access: s.network_access,
-                },
-                None => SandboxPolicy::new_workspace_write_policy(),
-            },
-            SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
-        }
-    }
-}
+impl ConfigToml {}
 
 /// Optional overrides for user configuration (e.g., from CLI flags).
 #[derive(Default, Debug, Clone)]
@@ -349,10 +322,8 @@ pub struct ConfigOverrides {
     pub model: Option<String>,
     pub cwd: Option<PathBuf>,
     pub approval_policy: Option<AskForApproval>,
-    pub sandbox_mode: Option<SandboxMode>,
     pub model_provider: Option<String>,
     pub config_profile: Option<String>,
-    pub codex_linux_sandbox_exe: Option<PathBuf>,
 }
 
 impl Config {
@@ -363,6 +334,8 @@ impl Config {
         overrides: ConfigOverrides,
         codex_home: PathBuf,
     ) -> std::io::Result<Self> {
+        crate::debug_log!("[CONFIG] Base config loaded, applying profile: {:?}", overrides.config_profile);
+        
         let instructions = Self::load_instructions(Some(&codex_home));
 
         // Destructure ConfigOverrides fully to ensure all overrides are applied.
@@ -370,10 +343,8 @@ impl Config {
             model,
             cwd,
             approval_policy,
-            sandbox_mode,
             model_provider,
             config_profile: config_profile_key,
-            codex_linux_sandbox_exe,
         } = overrides;
 
         let config_profile = match config_profile_key.as_ref().or(cfg.profile.as_ref()) {
@@ -390,7 +361,6 @@ impl Config {
             None => ConfigProfile::default(),
         };
 
-        let sandbox_policy = cfg.derive_sandbox_policy(sandbox_mode);
 
         let mut model_providers = built_in_model_providers();
         // Merge user-defined providers into the built-in list.
@@ -411,6 +381,8 @@ impl Config {
                 )
             })?
             .clone();
+            
+        crate::debug_log!("[CONFIG] Model provider resolved: {} -> {:?}", model_provider_id, model_provider);
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
 
@@ -439,6 +411,9 @@ impl Config {
             .or(config_profile.model)
             .or(cfg.model)
             .unwrap_or_else(default_model);
+        
+        crate::debug_log!("[CONFIG] Model selected: {}", model);
+        
         let openai_model_info = get_model_info(&model);
         let model_context_window = cfg
             .model_context_window
@@ -459,7 +434,6 @@ impl Config {
                 .or(config_profile.approval_policy)
                 .or(cfg.approval_policy)
                 .unwrap_or_else(AskForApproval::default),
-            sandbox_policy,
             shell_environment_policy,
             disable_response_storage: config_profile
                 .disable_response_storage
@@ -474,7 +448,6 @@ impl Config {
             history,
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             tui: cfg.tui.unwrap_or_default(),
-            codex_linux_sandbox_exe,
 
             hide_agent_reasoning: cfg.hide_agent_reasoning.unwrap_or(false),
             model_reasoning_effort: config_profile
@@ -596,57 +569,6 @@ persistence = "none"
         );
     }
 
-    #[test]
-    fn test_sandbox_config_parsing() {
-        let sandbox_full_access = r#"
-sandbox_mode = "danger-full-access"
-
-[sandbox_workspace_write]
-network_access = false  # This should be ignored.
-"#;
-        let sandbox_full_access_cfg = toml::from_str::<ConfigToml>(sandbox_full_access)
-            .expect("TOML deserialization should succeed");
-        let sandbox_mode_override = None;
-        assert_eq!(
-            SandboxPolicy::DangerFullAccess,
-            sandbox_full_access_cfg.derive_sandbox_policy(sandbox_mode_override)
-        );
-
-        let sandbox_read_only = r#"
-sandbox_mode = "read-only"
-
-[sandbox_workspace_write]
-network_access = true  # This should be ignored.
-"#;
-
-        let sandbox_read_only_cfg = toml::from_str::<ConfigToml>(sandbox_read_only)
-            .expect("TOML deserialization should succeed");
-        let sandbox_mode_override = None;
-        assert_eq!(
-            SandboxPolicy::ReadOnly,
-            sandbox_read_only_cfg.derive_sandbox_policy(sandbox_mode_override)
-        );
-
-        let sandbox_workspace_write = r#"
-sandbox_mode = "workspace-write"
-
-[sandbox_workspace_write]
-writable_roots = [
-    "/tmp",
-]
-"#;
-
-        let sandbox_workspace_write_cfg = toml::from_str::<ConfigToml>(sandbox_workspace_write)
-            .expect("TOML deserialization should succeed");
-        let sandbox_mode_override = None;
-        assert_eq!(
-            SandboxPolicy::WorkspaceWrite {
-                writable_roots: vec![PathBuf::from("/tmp")],
-                network_access: false,
-            },
-            sandbox_workspace_write_cfg.derive_sandbox_policy(sandbox_mode_override)
-        );
-    }
 
     struct PrecedenceTestFixture {
         cwd: TempDir,
@@ -781,7 +703,6 @@ disable_response_storage = true
                 model_provider_id: "openai".to_string(),
                 model_provider: fixture.openai_provider.clone(),
                 approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::DangerFullAccess,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 disable_response_storage: false,
                 instructions: None,
@@ -794,7 +715,6 @@ disable_response_storage = true
                 history: History::default(),
                 file_opener: UriBasedFileOpener::VsCode,
                 tui: Tui::default(),
-                codex_linux_sandbox_exe: None,
                 hide_agent_reasoning: false,
                 model_reasoning_effort: ReasoningEffort::High,
                 model_reasoning_summary: ReasoningSummary::Detailed,
@@ -827,7 +747,6 @@ disable_response_storage = true
             model_provider_id: "openai-chat-completions".to_string(),
             model_provider: fixture.openai_chat_completions_provider.clone(),
             approval_policy: AskForApproval::UnlessTrusted,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             disable_response_storage: false,
             instructions: None,
@@ -840,7 +759,6 @@ disable_response_storage = true
             history: History::default(),
             file_opener: UriBasedFileOpener::VsCode,
             tui: Tui::default(),
-            codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
             model_reasoning_effort: ReasoningEffort::default(),
             model_reasoning_summary: ReasoningSummary::default(),
@@ -888,7 +806,6 @@ disable_response_storage = true
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             approval_policy: AskForApproval::OnFailure,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             disable_response_storage: true,
             instructions: None,
@@ -901,7 +818,6 @@ disable_response_storage = true
             history: History::default(),
             file_opener: UriBasedFileOpener::VsCode,
             tui: Tui::default(),
-            codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
             model_reasoning_effort: ReasoningEffort::default(),
             model_reasoning_summary: ReasoningSummary::default(),

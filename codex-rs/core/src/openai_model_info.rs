@@ -66,6 +66,12 @@ pub(crate) fn get_model_info(name: &str) -> Option<ModelInfo> {
             max_output_tokens: 4_096,
         }),
 
+        // https://docs.x.ai/docs/guides/function-calling
+        "grok-4" | "grok-4-0709" => Some(ModelInfo {
+            context_window: 256_000,
+            max_output_tokens: 8_192,
+        }),
+
         _ => None,
     }
 }

@@ -1,5 +1,4 @@
 use codex_common::elapsed::format_elapsed;
-use codex_common::summarize_sandbox_policy;
 use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_core::model_supports_reasoning_summaries;
@@ -136,7 +135,7 @@ impl EventProcessor {
             ("model", config.model.clone()),
             ("provider", config.model_provider_id.clone()),
             ("approval", format!("{:?}", config.approval_policy)),
-            ("sandbox", summarize_sandbox_policy(&config.sandbox_policy)),
+            ("sandbox", "unrestricted".to_string()),
         ];
         if config.model_provider.wire_api == WireApi::Responses
             && model_supports_reasoning_summaries(config)

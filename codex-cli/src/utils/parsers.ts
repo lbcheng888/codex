@@ -82,6 +82,26 @@ export function parseToolCallArguments(
     return undefined;
   }
 
+  // Some models (e.g. xAI Grok, Claude function-calling) wrap the actual
+  // arguments in an extra { arguments: { … } } envelope that also carries a
+  // top-level `tool_name` / `name` field.  Detect and unwrap this scenario so
+  // that we can reuse the same extraction logic regardless of the exact
+  // nesting produced by the model.
+
+  // If we see an `arguments` property *and* it's an object, treat its content
+  // as the real payload to look for `cmd` / `command` etc.  This keeps the
+  // original behaviour fully intact for the standard shape while expanding
+  // support to the nested variant.
+
+  if (
+    "arguments" in (json as Record<string, unknown>) &&
+    typeof (json as Record<string, unknown>).arguments === "object" &&
+    (json as Record<string, unknown>).arguments !== null
+  ) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    json = (json as Record<string, unknown>).arguments as Record<string, unknown>;
+  }
+
   const { cmd, command } = json as Record<string, unknown>;
   // The OpenAI model sometimes produces a single string instead of an array.
   // Accept both shapes:

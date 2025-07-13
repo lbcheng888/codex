@@ -2,6 +2,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 
 use clap::Parser;
+use codex_common::json_utils;
 use codex_file_search::Cli;
 use codex_file_search::FileMatch;
 use codex_file_search::Reporter;
@@ -27,7 +28,10 @@ struct StdioReporter {
 impl Reporter for StdioReporter {
     fn report_match(&self, file_match: &FileMatch) {
         if self.write_output_as_json {
-            println!("{}", serde_json::to_string(&file_match).unwrap());
+            match json_utils::to_json_string(&file_match) {
+                Ok(json_str) => println!("{}", json_str),
+                Err(e) => eprintln!("Error serializing file match to JSON: {}", e),
+            }
         } else if self.show_indices {
             let indices = file_match
                 .indices
@@ -61,7 +65,10 @@ impl Reporter for StdioReporter {
     fn warn_matches_truncated(&self, total_match_count: usize, shown_match_count: usize) {
         if self.write_output_as_json {
             let value = json!({"matches_truncated": true});
-            println!("{}", serde_json::to_string(&value).unwrap());
+            match json_utils::to_json_string(&value) {
+                Ok(json_str) => println!("{}", json_str),
+                Err(e) => eprintln!("Error serializing warning to JSON: {}", e),
+            }
         } else {
             eprintln!(
                 "Warning: showing {shown_match_count} out of {total_match_count} results. Provide a more specific pattern or increase the --limit.",

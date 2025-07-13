@@ -68,10 +68,20 @@ impl ModelClient {
     /// the provider config.  Public callers always invoke `stream()` – the
     /// specialised helpers are private to avoid accidental misuse.
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
+        crate::debug_log!("[CLIENT] stream() called with {} input items", prompt.input.len());
+        crate::debug_log!("[CLIENT] Using provider: {:?}, model: {}", self.provider.wire_api, self.config.model);
+        crate::debug_log!("[CLIENT] Provider base_url: {}", self.provider.base_url);
+        crate::debug_log!("[CLIENT] Provider env_key: {:?}", self.provider.env_key);
+        
         match self.provider.wire_api {
-            WireApi::Responses => self.stream_responses(prompt).await,
+            WireApi::Responses => {
+                crate::debug_log!("[CLIENT] Using Responses API");
+                self.stream_responses(prompt).await
+            },
             WireApi::Chat => {
+                crate::debug_log!("[CLIENT] Using Chat Completions API");
                 // Create the raw streaming connection first.
+                crate::debug_log!("[CLIENT] Calling stream_chat_completions...");
                 let response_stream = stream_chat_completions(
                     prompt,
                     &self.config.model,
@@ -79,6 +89,7 @@ impl ModelClient {
                     &self.provider,
                 )
                 .await?;
+                crate::debug_log!("[CLIENT] stream_chat_completions completed successfully");
 
                 // Wrap it with the aggregation adapter so callers see *only*
                 // the final assistant message per turn (matching the
@@ -172,6 +183,11 @@ impl ModelClient {
                     }
 
                     if attempt > *OPENAI_REQUEST_MAX_RETRIES {
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            crate::debug_log!(
+                                "[CLIENT] Rate limit retry exhausted. Grok-4 has limits: 32K TPM, 120 RPM. Consider spacing requests further apart."
+                            );
+                        }
                         return Err(CodexErr::RetryLimit(status));
                     }
 
@@ -182,9 +198,24 @@ impl ModelClient {
                         .and_then(|v| v.to_str().ok())
                         .and_then(|s| s.parse::<u64>().ok());
 
-                    let delay = retry_after_secs
-                        .map(|s| Duration::from_millis(s * 1_000))
-                        .unwrap_or_else(|| backoff(attempt));
+                    let delay = if status == StatusCode::TOO_MANY_REQUESTS {
+                        // For 429 errors, ensure minimum 60 seconds delay for Grok API rate limits
+                        let api_suggested_delay = retry_after_secs.unwrap_or(60);
+                        let minimum_delay = std::cmp::max(api_suggested_delay, 60);
+                        crate::debug_log!(
+                            "[CLIENT] Rate limit hit (429). API suggested: {}s, Using: {}s", 
+                            retry_after_secs.unwrap_or(0), 
+                            minimum_delay
+                        );
+                        Duration::from_secs(minimum_delay)
+                    } else {
+                        // For server errors, use existing backoff logic
+                        retry_after_secs
+                            .map(|s| Duration::from_secs(s))
+                            .unwrap_or_else(|| backoff(attempt))
+                    };
+                    
+                    crate::debug_log!("[CLIENT] Retrying in {:?} (attempt {}/{})", delay, attempt, *OPENAI_REQUEST_MAX_RETRIES);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => {

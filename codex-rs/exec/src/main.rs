@@ -24,7 +24,7 @@ struct TopCli {
 }
 
 fn main() -> anyhow::Result<()> {
-    codex_linux_sandbox::run_with_sandbox(|codex_linux_sandbox_exe| async move {
+    tokio::runtime::Runtime::new()?.block_on(async {
         let top_cli = TopCli::parse();
         // Merge root-level overrides into inner CLI struct so downstream logic remains unchanged.
         let mut inner = top_cli.inner;
@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
             .raw_overrides
             .splice(0..0, top_cli.config_overrides.raw_overrides);
 
-        run_main(inner, codex_linux_sandbox_exe).await?;
+        run_main(inner, None).await?;
         Ok(())
     })
 }

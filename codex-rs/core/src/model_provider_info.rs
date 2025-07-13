@@ -207,6 +207,19 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
                 ),
             },
         ),
+        (
+            "xai",
+            P {
+                name: "xAI".into(),
+                base_url: "https://api.x.ai/v1".into(),
+                env_key: Some("XAI_API_KEY".into()),
+                env_key_instructions: Some("Create an API key at console.x.ai and export it as an environment variable.".into()),
+                wire_api: WireApi::Chat,
+                query_params: None,
+                http_headers: None,
+                env_http_headers: None,
+            },
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))

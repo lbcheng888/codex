@@ -1,23 +1,30 @@
 import type { AppConfig } from "../config.js";
-import type { ExecInput, ExecResult } from "./sandbox/interface.js";
 import type { SpawnOptions } from "child_process";
 import type { ParseEntry } from "shell-quote";
 
 import { process_patch } from "./apply-patch.js";
-import { SandboxType } from "./sandbox/interface.js";
-import { execWithLandlock } from "./sandbox/landlock.js";
-import { execWithSeatbelt } from "./sandbox/macos-seatbelt.js";
-import { exec as rawExec } from "./sandbox/raw-exec.js";
 import { formatCommandForDisplay } from "../../format-command.js";
 import { log } from "../logger/log.js";
 import fs from "fs";
-import os from "os";
 import path from "path";
 import { parse } from "shell-quote";
 import { resolvePathAgainstWorkdir } from "src/approvals.js";
 import { PATCH_SUFFIX } from "src/parse-apply-patch.js";
+import { spawn } from "child_process";
 
 const DEFAULT_TIMEOUT_MS = 10_000; // 10 seconds
+
+export type ExecInput = {
+  cmd: Array<string>;
+  workdir: string | undefined;
+  timeoutInMillis: number | undefined;
+};
+
+export type ExecResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+};
 
 function requiresShell(cmd: Array<string>): boolean {
   // If the command is a single string that contains shell operators,
@@ -33,50 +40,78 @@ function requiresShell(cmd: Array<string>): boolean {
 }
 
 /**
- * This function should never return a rejected promise: errors should be
- * mapped to a non-zero exit code and the error message should be in stderr.
+ * Execute command with no restrictions or sandboxing
  */
 export function exec(
   {
     cmd,
     workdir,
     timeoutInMillis,
-    additionalWritableRoots,
-  }: ExecInput & { additionalWritableRoots: ReadonlyArray<string> },
-  sandbox: SandboxType,
+  }: ExecInput,
   config: AppConfig,
   abortSignal?: AbortSignal,
 ): Promise<ExecResult> {
-  const opts: SpawnOptions = {
-    timeout: timeoutInMillis || DEFAULT_TIMEOUT_MS,
-    ...(requiresShell(cmd) ? { shell: true } : {}),
-    ...(workdir ? { cwd: workdir } : {}),
-  };
+  return new Promise((resolve) => {
+    const [command, ...args] = cmd;
+    if (!command) {
+      resolve({
+        stdout: "",
+        stderr: "No command provided",
+        exitCode: 1,
+      });
+      return;
+    }
 
-  switch (sandbox) {
-    case SandboxType.NONE: {
-      // SandboxType.NONE uses the raw exec implementation.
-      return rawExec(cmd, opts, config, abortSignal);
+    const options: SpawnOptions = {
+      timeout: timeoutInMillis || DEFAULT_TIMEOUT_MS,
+      ...(requiresShell(cmd) ? { shell: true } : {}),
+      ...(workdir ? { cwd: workdir } : {}),
+    };
+
+    const child = spawn(command, args, options);
+    
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout?.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr?.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    child.on("close", (code) => {
+      resolve({
+        stdout,
+        stderr,
+        exitCode: code || 0,
+      });
+    });
+
+    child.on("error", (error) => {
+      resolve({
+        stdout,
+        stderr: error.message,
+        exitCode: 1,
+      });
+    });
+
+    // Some tests provide a jest.fn() shim or a minimal stub that does not
+    // expose the full EventTarget interface.  Guard against this so that we
+    // don't attempt to call `addEventListener` on objects that merely satisfy
+    // the TypeScript structural type but lack the actual method at runtime.
+
+    if (
+      abortSignal &&
+      typeof (abortSignal as unknown as { addEventListener?: unknown })
+        .addEventListener === "function"
+    ) {
+      abortSignal.addEventListener("abort", () => {
+        child.kill();
+      });
     }
-    case SandboxType.MACOS_SEATBELT: {
-      // Merge default writable roots with any user-specified ones.
-      const writableRoots = [
-        process.cwd(),
-        os.tmpdir(),
-        ...additionalWritableRoots,
-      ];
-      return execWithSeatbelt(cmd, opts, writableRoots, config, abortSignal);
-    }
-    case SandboxType.LINUX_LANDLOCK: {
-      return execWithLandlock(
-        cmd,
-        opts,
-        additionalWritableRoots,
-        config,
-        abortSignal,
-      );
-    }
-  }
+  });
 }
 
 export function execApplyPatch(

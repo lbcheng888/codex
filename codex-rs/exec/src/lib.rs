@@ -7,11 +7,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_common::io_utils;
+
 pub use cli::Cli;
 use codex_core::codex_wrapper;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
-use codex_core::config_types::SandboxMode;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
@@ -25,18 +26,17 @@ use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
+pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     let Cli {
         images,
         model,
         config_profile,
-        full_auto,
-        dangerously_bypass_approvals_and_sandbox,
+        full_auto: _,
+        dangerously_bypass_approvals_and_sandbox: _,
         cwd,
         skip_git_repo_check,
         color,
         last_message_file,
-        sandbox_mode: sandbox_mode_cli_arg,
         prompt,
         config_overrides,
     } = cli;
@@ -85,14 +85,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         ),
     };
 
-    let sandbox_mode = if full_auto {
-        Some(SandboxMode::WorkspaceWrite)
-    } else if dangerously_bypass_approvals_and_sandbox {
-        Some(SandboxMode::DangerFullAccess)
-    } else {
-        sandbox_mode_cli_arg.map(Into::<SandboxMode>::into)
-    };
-
     // Load configuration and determine approval policy
     let overrides = ConfigOverrides {
         model,
@@ -100,10 +92,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         // This CLI is intended to be headless and has no affordances for asking
         // the user for approval.
         approval_policy: Some(AskForApproval::Never),
-        sandbox_mode,
         cwd: cwd.map(|p| p.canonicalize().unwrap_or(p)),
         model_provider: None,
-        codex_linux_sandbox_exe,
     };
     // Parse `-c` overrides.
     let cli_kv_overrides = match config_overrides.parse_overrides() {
@@ -218,7 +208,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         };
         event_processor.process_event(event);
         if is_last_event {
-            handle_last_message(last_assistant_message, last_message_file.as_deref())?;
+            handle_last_message(last_assistant_message, last_message_file.as_deref()).await?;
             break;
         }
     }
@@ -226,14 +216,14 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     Ok(())
 }
 
-fn handle_last_message(
+async fn handle_last_message(
     last_agent_message: Option<String>,
     last_message_file: Option<&Path>,
-) -> std::io::Result<()> {
+) -> anyhow::Result<()> {
     match (last_agent_message, last_message_file) {
         (Some(last_agent_message), Some(last_message_file)) => {
             // Last message and a file to write to.
-            std::fs::write(last_message_file, last_agent_message)?;
+            io_utils::write_string(last_message_file, &last_agent_message).await?;
         }
         (None, Some(last_message_file)) => {
             eprintln!(

@@ -96,8 +96,29 @@ export const CONFIG_TOML_FILEPATH = join(CONFIG_DIR, "config.toml");
 export const CONFIG_FILEPATH = CONFIG_TOML_FILEPATH;
 export const INSTRUCTIONS_FILEPATH = join(CONFIG_DIR, "instructions.md");
 
-export const OPENAI_TIMEOUT_MS =
-  parseInt(process.env["OPENAI_TIMEOUT_MS"] || "0", 10) || undefined;
+// Default request timeout (in milliseconds) for the OpenAI-compatible HTTP
+// client.  Historically we left the timeout **undefined** when the user had
+// not explicitly configured `OPENAI_TIMEOUT_MS`.  Unfortunately this meant
+// that network requests could hang indefinitely if the upstream service never
+// responded (or took an excessively long time to do so) – something we have
+// observed when talking to certain third-party providers such as xAI's Grok.
+
+// To provide a better out-of-the-box experience we now fall back to a sane
+// default (90 seconds) whenever the environment variable is *not* set.  Power
+// users can still override this behaviour by exporting `OPENAI_TIMEOUT_MS`.
+export const OPENAI_TIMEOUT_MS = (() => {
+  const raw = process.env["OPENAI_TIMEOUT_MS"];
+
+  // If the env var is explicitly set we honour it, even if the value is
+  // "0" (which disables the timeout entirely).
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }
+
+  // Otherwise use the default.
+  return 90_000; // 90 seconds
+})();
 export const OPENAI_BASE_URL = process.env["OPENAI_BASE_URL"] || "";
 export let OPENAI_API_KEY = process.env["OPENAI_API_KEY"] || "";
 

@@ -11,6 +11,10 @@ import { exec, execApplyPatch } from "./exec.js";
 import { ReviewDecision } from "./review.js";
 import { isLoggingEnabled, log } from "../logger/log.js";
 import { SandboxType } from "./sandbox/interface.js";
+// Importing the seatbelt helper is optional in environments where the binary
+// is not available (e.g. CI).  Switching to the `.ts` path avoids the build
+// error caused by missing JS dist output when using ts-node / tsx.
+
 import { PATH_TO_SEATBELT_EXECUTABLE } from "./sandbox/macos-seatbelt.js";
 import fs from "fs/promises";
 

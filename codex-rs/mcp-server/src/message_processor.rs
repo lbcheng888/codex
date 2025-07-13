@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::codex_tool_config::CodexToolCallParam;
 use crate::codex_tool_config::create_tool_for_codex_tool_call_param;
+use crate::parallel_read_tool::{create_parallel_read_tool, execute_parallel_read, ParallelReadParams};
 
 use codex_core::config::Config as CodexConfig;
 use mcp_types::CallToolRequestParams;
@@ -27,7 +28,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task;
 
-pub(crate) struct MessageProcessor {
+pub struct MessageProcessor {
     outgoing: mpsc::Sender<JSONRPCMessage>,
     initialized: bool,
     codex_linux_sandbox_exe: Option<PathBuf>,
@@ -36,7 +37,7 @@ pub(crate) struct MessageProcessor {
 impl MessageProcessor {
     /// Create a new `MessageProcessor`, retaining a handle to the outgoing
     /// `Sender` so handlers can enqueue messages to be written to stdout.
-    pub(crate) fn new(
+    pub fn new(
         outgoing: mpsc::Sender<JSONRPCMessage>,
         codex_linux_sandbox_exe: Option<PathBuf>,
     ) -> Self {
@@ -47,7 +48,7 @@ impl MessageProcessor {
         }
     }
 
-    pub(crate) fn process_request(&mut self, request: JSONRPCRequest) {
+    pub fn process_request(&mut self, request: JSONRPCRequest) {
         // Hold on to the ID so we can respond.
         let request_id = request.id.clone();
 
@@ -314,7 +315,10 @@ impl MessageProcessor {
     ) {
         tracing::trace!("tools/list -> {params:?}");
         let result = ListToolsResult {
-            tools: vec![create_tool_for_codex_tool_call_param()],
+            tools: vec![
+                create_tool_for_codex_tool_call_param(),
+                create_parallel_read_tool(),
+            ],
             next_cursor: None,
         };
 
@@ -329,20 +333,33 @@ impl MessageProcessor {
         tracing::info!("tools/call -> params: {:?}", params);
         let CallToolRequestParams { name, arguments } = params;
 
-        // We only support the "codex" tool for now.
-        if name != "codex" {
-            // Tool not found – return error result so the LLM can react.
-            let result = CallToolResult {
-                content: vec![CallToolResultContent::TextContent(TextContent {
-                    r#type: "text".to_string(),
-                    text: format!("Unknown tool '{name}'"),
-                    annotations: None,
-                })],
-                is_error: Some(true),
-            };
-            self.send_response::<mcp_types::CallToolRequest>(id, result);
-            return;
+        match name.as_str() {
+            "codex" => {
+                self.handle_codex_tool_call(id, arguments);
+            }
+            "parallel_read" => {
+                self.handle_parallel_read_tool_call(id, arguments);
+            }
+            _ => {
+                // Tool not found – return error result so the LLM can react.
+                let result = CallToolResult {
+                    content: vec![CallToolResultContent::TextContent(TextContent {
+                        r#type: "text".to_string(),
+                        text: format!("Unknown tool '{name}'"),
+                        annotations: None,
+                    })],
+                    is_error: Some(true),
+                };
+                self.send_response::<mcp_types::CallToolRequest>(id, result);
+            }
         }
+    }
+
+    fn handle_codex_tool_call(
+        &self,
+        id: RequestId,
+        arguments: Option<serde_json::Value>,
+    ) {
 
         let (initial_prompt, config): (String, CodexConfig) = match arguments {
             Some(json_val) => match serde_json::from_value::<CodexToolCallParam>(json_val) {
@@ -401,6 +418,94 @@ impl MessageProcessor {
             // Run the Codex session and stream events back to the client.
             crate::codex_tool_runner::run_codex_tool_session(id, initial_prompt, config, outgoing)
                 .await;
+        });
+    }
+
+    fn handle_parallel_read_tool_call(
+        &self,
+        id: RequestId,
+        arguments: Option<serde_json::Value>,
+    ) {
+        let params = match arguments {
+            Some(json_val) => match serde_json::from_value::<ParallelReadParams>(json_val) {
+                Ok(params) => params,
+                Err(e) => {
+                    let result = CallToolResult {
+                        content: vec![CallToolResultContent::TextContent(TextContent {
+                            r#type: "text".to_string(),
+                            text: format!("Failed to parse parameters for parallel_read tool: {}", e),
+                            annotations: None,
+                        })],
+                        is_error: Some(true),
+                    };
+                    self.send_response::<mcp_types::CallToolRequest>(id, result);
+                    return;
+                }
+            },
+            None => {
+                let result = CallToolResult {
+                    content: vec![CallToolResultContent::TextContent(TextContent {
+                        r#type: "text".to_string(),
+                        text: "Missing arguments for parallel_read tool-call; the `file_paths` field is required.".to_string(),
+                        annotations: None,
+                    })],
+                    is_error: Some(true),
+                };
+                self.send_response::<mcp_types::CallToolRequest>(id, result);
+                return;
+            }
+        };
+
+        // Clone outgoing sender to move into async task.
+        let outgoing = self.outgoing.clone();
+
+        // Spawn an async task to handle the parallel read operation
+        task::spawn(async move {
+            let result = execute_parallel_read(params).await;
+            
+            // Convert the result to JSON and send back
+            match serde_json::to_string_pretty(&result) {
+                Ok(json_output) => {
+                    let call_result = CallToolResult {
+                        content: vec![CallToolResultContent::TextContent(TextContent {
+                            r#type: "text".to_string(),
+                            text: json_output,
+                            annotations: None,
+                        })],
+                        is_error: Some(result.error_count > 0),
+                    };
+                    
+                    let response = JSONRPCMessage::Response(JSONRPCResponse {
+                        jsonrpc: JSONRPC_VERSION.into(),
+                        id,
+                        result: serde_json::to_value(call_result).unwrap(),
+                    });
+                    
+                    if let Err(e) = outgoing.try_send(response) {
+                        tracing::error!("Failed to send parallel_read response: {}", e);
+                    }
+                }
+                Err(e) => {
+                    let error_result = CallToolResult {
+                        content: vec![CallToolResultContent::TextContent(TextContent {
+                            r#type: "text".to_string(),
+                            text: format!("Failed to serialize parallel_read result: {}", e),
+                            annotations: None,
+                        })],
+                        is_error: Some(true),
+                    };
+                    
+                    let response = JSONRPCMessage::Response(JSONRPCResponse {
+                        jsonrpc: JSONRPC_VERSION.into(),
+                        id,
+                        result: serde_json::to_value(error_result).unwrap(),
+                    });
+                    
+                    if let Err(e) = outgoing.try_send(response) {
+                        tracing::error!("Failed to send parallel_read error response: {}", e);
+                    }
+                }
+            }
         });
     }
 

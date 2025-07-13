@@ -119,6 +119,10 @@ pub(crate) async fn stream_chat_completions(
         provider.get_full_url(),
         serde_json::to_string_pretty(&payload).unwrap_or_default()
     );
+    
+    crate::debug_log!("[CHAT] Sending request to {} with model: {}", provider.get_full_url(), model);
+    crate::debug_log!("[CHAT] Message count: {}, Tools count: {}", messages.len(), tools_json.len());
+    crate::debug_log!("[CHAT] Full request payload: {}", serde_json::to_string_pretty(&payload).unwrap_or_default());
 
     let mut attempt = 0;
     loop {
@@ -134,6 +138,7 @@ pub(crate) async fn stream_chat_completions(
 
         match res {
             Ok(resp) if resp.status().is_success() => {
+                crate::debug_log!("[CHAT] HTTP Response successful: {}", resp.status());
                 let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(16);
                 let stream = resp.bytes_stream().map_err(CodexErr::Reqwest);
                 tokio::spawn(process_chat_sse(stream, tx_event));
@@ -141,12 +146,19 @@ pub(crate) async fn stream_chat_completions(
             }
             Ok(res) => {
                 let status = res.status();
+                crate::debug_log!("[CHAT] HTTP Response error status: {}", status);
                 if !(status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) {
                     let body = (res.text().await).unwrap_or_default();
+                    crate::debug_log!("[CHAT] Error response body: {}", body);
                     return Err(CodexErr::UnexpectedStatus(status, body));
                 }
 
                 if attempt > *OPENAI_REQUEST_MAX_RETRIES {
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        crate::debug_log!(
+                            "[CHAT] Rate limit retry exhausted. Grok-4 has limits: 32K TPM, 120 RPM. Consider spacing requests further apart."
+                        );
+                    }
                     return Err(CodexErr::RetryLimit(status));
                 }
 
@@ -156,12 +168,28 @@ pub(crate) async fn stream_chat_completions(
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok());
 
-                let delay = retry_after_secs
-                    .map(|s| Duration::from_millis(s * 1_000))
-                    .unwrap_or_else(|| backoff(attempt));
+                let delay = if status == StatusCode::TOO_MANY_REQUESTS {
+                    // For 429 errors, ensure minimum 60 seconds delay for Grok API rate limits
+                    let api_suggested_delay = retry_after_secs.unwrap_or(60);
+                    let minimum_delay = std::cmp::max(api_suggested_delay, 60);
+                    crate::debug_log!(
+                        "[CHAT] Rate limit hit (429). API suggested: {}s, Using: {}s", 
+                        retry_after_secs.unwrap_or(0), 
+                        minimum_delay
+                    );
+                    Duration::from_secs(minimum_delay)
+                } else {
+                    // For server errors, use existing backoff logic
+                    retry_after_secs
+                        .map(|s| Duration::from_secs(s))
+                        .unwrap_or_else(|| backoff(attempt))
+                };
+                
+                crate::debug_log!("[CHAT] Retrying in {:?} (attempt {}/{})", delay, attempt, *OPENAI_REQUEST_MAX_RETRIES);
                 tokio::time::sleep(delay).await;
             }
             Err(e) => {
+                crate::debug_log!("[CHAT] HTTP Request failed: {}", e);
                 if attempt > *OPENAI_REQUEST_MAX_RETRIES {
                     return Err(e.into());
                 }
@@ -206,6 +234,21 @@ where
                 return;
             }
             Ok(None) => {
+                crate::debug_log!("[CHAT] Stream closed gracefully - fn_call_state.active: {}", fn_call_state.active);
+                
+                // Check if we have an incomplete function call when stream ends
+                if fn_call_state.active {
+                    crate::debug_log!("[CHAT] Stream ended with active function call - emitting FunctionCall");
+                    let item = ResponseItem::FunctionCall {
+                        name: fn_call_state.name.clone().unwrap_or_else(|| "".to_string()),
+                        arguments: fn_call_state.arguments.clone(),
+                        call_id: fn_call_state.call_id.clone().unwrap_or_else(String::new),
+                    };
+                    
+                    crate::debug_log!("[CHAT] Emitting FunctionCall on stream end: {:#?}", item);
+                    let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+                }
+                
                 // Stream closed gracefully – emit Completed with dummy id.
                 let _ = tx_event
                     .send(Ok(ResponseEvent::Completed {
@@ -225,6 +268,21 @@ where
 
         // OpenAI Chat streaming sends a literal string "[DONE]" when finished.
         if sse.data.trim() == "[DONE]" {
+            crate::debug_log!("[CHAT] Received [DONE] - fn_call_state.active: {}", fn_call_state.active);
+            
+            // Check if we have an incomplete function call when [DONE] is received
+            if fn_call_state.active {
+                crate::debug_log!("[CHAT] [DONE] with active function call - emitting FunctionCall");
+                let item = ResponseItem::FunctionCall {
+                    name: fn_call_state.name.clone().unwrap_or_else(|| "".to_string()),
+                    arguments: fn_call_state.arguments.clone(),
+                    call_id: fn_call_state.call_id.clone().unwrap_or_else(String::new),
+                };
+                
+                crate::debug_log!("[CHAT] Emitting FunctionCall on [DONE]: {:#?}", item);
+                let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+            }
+            
             let _ = tx_event
                 .send(Ok(ResponseEvent::Completed {
                     response_id: String::new(),
@@ -240,8 +298,23 @@ where
             Err(_) => continue,
         };
         trace!("chat_completions received SSE chunk: {chunk:?}");
+        
+        // DEBUG: Log raw SSE data for Grok debugging
+        crate::debug_log!("[CHAT] Raw SSE data: {}", sse.data);
+        if let Some(choices) = chunk.get("choices") {
+            crate::debug_log!("[CHAT] Choices: {}", serde_json::to_string(choices).unwrap_or_default());
+        }
 
         let choice_opt = chunk.get("choices").and_then(|c| c.get(0));
+        
+        // DEBUG: Check if this chunk has a finish_reason
+        if let Some(choice) = choice_opt {
+            if let Some(finish_reason) = choice.get("finish_reason") {
+                crate::debug_log!("[CHAT] Found finish_reason in chunk: {:?}", finish_reason);
+            } else {
+                crate::debug_log!("[CHAT] No finish_reason in this chunk");
+            }
+        }
 
         if let Some(choice) = choice_opt {
             // Handle assistant content tokens.
@@ -259,6 +332,18 @@ where
 
                 let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
             }
+            
+            // Handle Grok's reasoning_content (appears in delta for Grok models)
+            if let Some(reasoning_content) = choice
+                .get("delta")
+                .and_then(|d| d.get("reasoning_content"))
+                .and_then(|c| c.as_str())
+            {
+                crate::debug_log!("[CHAT] Grok reasoning content: {}", reasoning_content);
+                
+                // For now, just log reasoning content without emitting it as a separate item
+                // This avoids complexity while still supporting Grok's format
+            }
 
             // Handle streaming function / tool calls.
             if let Some(tool_calls) = choice
@@ -269,22 +354,26 @@ where
                 if let Some(tool_call) = tool_calls.first() {
                     // Mark that we have an active function call in progress.
                     fn_call_state.active = true;
+                    crate::debug_log!("[CHAT] Tool call detected in stream");
 
                     // Extract call_id if present.
                     if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
                         fn_call_state.call_id.get_or_insert_with(|| id.to_string());
+                        crate::debug_log!("[CHAT] Tool call ID: {}", id);
                     }
 
                     // Extract function details if present.
                     if let Some(function) = tool_call.get("function") {
                         if let Some(name) = function.get("name").and_then(|n| n.as_str()) {
                             fn_call_state.name.get_or_insert_with(|| name.to_string());
+                            crate::debug_log!("[CHAT] Tool call function name: {}", name);
                         }
 
                         if let Some(args_fragment) =
                             function.get("arguments").and_then(|a| a.as_str())
                         {
                             fn_call_state.arguments.push_str(args_fragment);
+                            crate::debug_log!("[CHAT] Tool call arguments fragment: {}", args_fragment);
                         }
                     }
                 }
@@ -292,8 +381,23 @@ where
 
             // Emit end-of-turn when finish_reason signals completion.
             if let Some(finish_reason) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                crate::debug_log!("[CHAT] Finish reason: {}", finish_reason);
                 match finish_reason {
                     "tool_calls" if fn_call_state.active => {
+                        // Build the FunctionCall response item.
+                        let item = ResponseItem::FunctionCall {
+                            name: fn_call_state.name.clone().unwrap_or_else(|| "".to_string()),
+                            arguments: fn_call_state.arguments.clone(),
+                            call_id: fn_call_state.call_id.clone().unwrap_or_else(String::new),
+                        };
+
+                        crate::debug_log!("[CHAT] Emitting FunctionCall: {:#?}", item);
+
+                        // Emit it downstream.
+                        let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+                    }
+                    // Handle providers that use empty string or other finish_reason values for tool calls
+                    "" if fn_call_state.active => {
                         // Build the FunctionCall response item.
                         let item = ResponseItem::FunctionCall {
                             name: fn_call_state.name.clone().unwrap_or_else(|| "".to_string()),
@@ -307,7 +411,20 @@ where
                     "stop" => {
                         // Regular turn without tool-call.
                     }
-                    _ => {}
+                    _ => {
+                        // If we have an active function call but unknown finish_reason, 
+                        // treat it as a tool call completion for compatibility with different providers
+                        if fn_call_state.active {
+                            let item = ResponseItem::FunctionCall {
+                                name: fn_call_state.name.clone().unwrap_or_else(|| "".to_string()),
+                                arguments: fn_call_state.arguments.clone(),
+                                call_id: fn_call_state.call_id.clone().unwrap_or_else(String::new),
+                            };
+
+                            // Emit it downstream.
+                            let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+                        }
+                    }
                 }
 
                 // Emit Completed regardless of reason so the agent can advance.

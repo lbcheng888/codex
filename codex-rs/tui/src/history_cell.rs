@@ -3,10 +3,10 @@ use crate::exec_command::escape_command;
 use crate::markdown::append_markdown;
 use crate::text_block::TextBlock;
 use crate::text_formatting::format_and_truncate_tool_result;
+use crate::theme::Theme;
 use base64::Engine;
 use codex_ansi_escape::ansi_escape_line;
 use codex_common::elapsed::format_duration;
-use codex_common::summarize_sandbox_policy;
 use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_core::model_supports_reasoning_summaries;
@@ -18,7 +18,6 @@ use image::ImageReader;
 use lazy_static::lazy_static;
 use mcp_types::EmbeddedResourceResource;
 use ratatui::prelude::*;
-use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line as RtLine;
@@ -121,12 +120,144 @@ pub(crate) enum HistoryCell {
 
 const TOOL_CALL_MAX_LINES: usize = 5;
 
+/// Force all spans in a line to use white foreground color for maximum readability
+#[allow(dead_code)]
+fn force_white_foreground(line: Line<'static>) -> Line<'static> {
+    let white_spans: Vec<_> = line.spans.into_iter().map(|span| {
+        // Preserve background and modifiers, but force white foreground
+        let mut new_style = span.style;
+        new_style.fg = Some(Color::Rgb(255, 255, 255));
+        Span::styled(span.content, new_style)
+    }).collect();
+    Line::from(white_spans).style(line.style)
+}
+
+/// Create a modern message bubble with rounded corners and proper padding
+fn create_message_bubble(
+    theme: &Theme,
+    header_text: String,
+    content_lines: Vec<String>,
+    is_user: bool,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    
+    // Clean styling without borders
+    let header_style = theme.message_header_style(is_user);
+    let content_style = Style::default().fg(Color::Rgb(250, 250, 250)); // Bright white for content
+    
+    // Simple header line
+    lines.push(Line::from(vec![
+        Span::styled(header_text, header_style),
+    ]));
+    
+    // Content lines without borders
+    for line in content_lines {
+        lines.push(Line::from(vec![
+            Span::styled(line, content_style),
+        ]));
+    }
+    
+    // Add spacing after message
+    lines.push(Line::from(""));
+    
+    lines
+}
+
+/// Create a modern message bubble for agent messages with markdown support
+fn create_agent_message_bubble(
+    theme: &Theme,
+    header_text: String,
+    message: &str,
+    config: &Config,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    
+    let header_style = theme.message_header_style(false); // Claude's orange for assistant messages
+    
+    // Process markdown content first
+    let mut content_lines: Vec<Line<'static>> = Vec::new();
+    append_markdown(message, &mut content_lines, config);
+    
+    // Simple header line
+    lines.push(Line::from(vec![
+        Span::styled(header_text, header_style),
+    ]));
+    
+    // Content lines without borders
+    for line in content_lines {
+        // Use bright white for content with proper markdown styling
+        let bright_spans: Vec<_> = line.spans.into_iter().map(|span| {
+            let mut new_style = span.style;
+            // Use bright white for text content, preserve other styling
+            if new_style.fg.is_none() || 
+               (new_style.fg == Some(Color::Rgb(255, 255, 255))) {
+                new_style.fg = Some(Color::Rgb(250, 250, 250)); // Bright white
+            }
+            Span::styled(span.content, new_style)
+        }).collect();
+        lines.push(Line::from(bright_spans));
+    }
+    
+    // Add spacing after message
+    lines.push(Line::from(""));
+    
+    lines
+}
+
+/// Create a special reasoning message bubble with distinctive styling
+fn create_reasoning_message_bubble(
+    theme: &Theme,
+    header_text: String,
+    text: &str,
+    config: &Config,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    
+    // Clean styling for reasoning content
+    let header_style = Style::default()
+        .fg(Color::Rgb(180, 180, 200))  // Subtle gray-blue for thinking header
+        .add_modifier(Modifier::ITALIC); // Italic thinking header
+    
+    // Process markdown content first
+    let mut content_lines: Vec<Line<'static>> = Vec::new();
+    append_markdown(text, &mut content_lines, config);
+    
+    // Simple header line
+    lines.push(Line::from(vec![
+        Span::styled(header_text, header_style),
+    ]));
+    
+    // Content lines without borders
+    for line in content_lines {
+        let bright_spans: Vec<Span> = line
+            .spans
+            .into_iter()
+            .map(|span| {
+                let mut new_style = span.style;
+                // Use bright white for content, preserve other styling
+                if new_style.fg.is_none() || 
+                   (new_style.fg == Some(Color::Rgb(255, 255, 255))) {
+                    new_style.fg = Some(Color::Rgb(250, 250, 250)); // Bright white
+                }
+                Span::styled(span.content, new_style)
+            })
+            .collect();
+        lines.push(Line::from(bright_spans));
+    }
+    
+    // Add spacing after message
+    lines.push(Line::from(""));
+    
+    lines
+}
+
 impl HistoryCell {
     pub(crate) fn new_session_info(
         config: &Config,
         event: SessionConfiguredEvent,
         is_first_event: bool,
     ) -> Self {
+        let theme = Theme::default();
         let SessionConfiguredEvent {
             model,
             session_id,
@@ -138,16 +269,16 @@ impl HistoryCell {
 
             let mut lines: Vec<Line<'static>> = vec![
                 Line::from(vec![
-                    "OpenAI ".into(),
-                    "Codex".bold(),
-                    format!(" v{VERSION}").into(),
-                    " (research preview)".dim(),
+                    Span::raw("OpenAI "),
+                    Span::styled("Codex", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(format!(" v{VERSION}")),
+                    Span::styled(" (research preview)", theme.dim_style()),
                 ]),
                 Line::from(""),
                 Line::from(vec![
-                    "codex session".magenta().bold(),
-                    " ".into(),
-                    session_id.to_string().dim(),
+                    Span::styled("codex session", theme.emphasis_style().fg(theme.status.info)),
+                    Span::raw(" "),
+                    Span::styled(session_id.to_string(), theme.dim_style()),
                 ]),
             ];
 
@@ -156,7 +287,7 @@ impl HistoryCell {
                 ("model", config.model.clone()),
                 ("provider", config.model_provider_id.clone()),
                 ("approval", format!("{:?}", config.approval_policy)),
-                ("sandbox", summarize_sandbox_policy(&config.sandbox_policy)),
+                ("sandbox", "unrestricted".to_string()),
             ];
             if config.model_provider.wire_api == WireApi::Responses
                 && model_supports_reasoning_summaries(config)
@@ -171,7 +302,10 @@ impl HistoryCell {
                 ));
             }
             for (key, value) in entries {
-                lines.push(Line::from(vec![format!("{key}: ").bold(), value.into()]));
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{key}: "), theme.emphasis_style()),
+                    Span::raw(value),
+                ]));
             }
             lines.push(Line::from(""));
             HistoryCell::WelcomeMessage {
@@ -183,7 +317,7 @@ impl HistoryCell {
             }
         } else {
             let lines = vec![
-                Line::from("model changed:".magenta().bold()),
+                Line::styled("model changed:", theme.emphasis_style().fg(theme.status.info)),
                 Line::from(format!("requested: {}", config.model)),
                 Line::from(format!("used: {model}")),
                 Line::from(""),
@@ -195,10 +329,15 @@ impl HistoryCell {
     }
 
     pub(crate) fn new_user_prompt(message: String) -> Self {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from("user".cyan().bold()));
-        lines.extend(message.lines().map(|l| Line::from(l.to_string())));
-        lines.push(Line::from(""));
+        let theme = Theme::default();
+        
+        // Convert message to lines for bubble creation
+        let content_lines: Vec<String> = message.lines()
+            .map(|line| line.to_string())
+            .collect();
+        
+        // Create modern bubble design
+        let lines = create_message_bubble(&theme, "user".to_string(), content_lines, true);
 
         HistoryCell::UserPrompt {
             view: TextBlock::new(lines),
@@ -206,10 +345,11 @@ impl HistoryCell {
     }
 
     pub(crate) fn new_agent_message(config: &Config, message: String) -> Self {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from("codex".magenta().bold()));
-        append_markdown(&message, &mut lines, config);
-        lines.push(Line::from(""));
+        let theme = Theme::default();
+        
+        // For assistant messages, we need to handle markdown specially
+        // Create a modern bubble with markdown content
+        let lines = create_agent_message_bubble(&theme, "codex".to_string(), &message, config);
 
         HistoryCell::AgentMessage {
             view: TextBlock::new(lines),
@@ -217,10 +357,10 @@ impl HistoryCell {
     }
 
     pub(crate) fn new_agent_reasoning(config: &Config, text: String) -> Self {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from("thinking".magenta().italic()));
-        append_markdown(&text, &mut lines, config);
-        lines.push(Line::from(""));
+        let theme = Theme::default();
+        
+        // Create a special reasoning bubble with distinctive styling
+        let lines = create_reasoning_message_bubble(&theme, "thinking".to_string(), &text, config);
 
         HistoryCell::AgentReasoning {
             view: TextBlock::new(lines),
@@ -231,8 +371,12 @@ impl HistoryCell {
         let command_escaped = escape_command(&command);
         let start = Instant::now();
 
+        let theme = Theme::default();
         let lines: Vec<Line<'static>> = vec![
-            Line::from(vec!["command".magenta(), " running...".dim()]),
+            Line::from(vec![
+                Span::styled("command", Style::default().fg(theme.status.info)),
+                Span::styled(" running...", theme.dim_style()),
+            ]),
             Line::from(format!("$ {command_escaped}")),
             Line::from(""),
         ];
@@ -255,28 +399,51 @@ impl HistoryCell {
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
+        let theme = Theme::default();
         // Title depends on whether we have output yet.
         let title_line = Line::from(vec![
-            "command".magenta(),
-            format!(
-                " (code: {}, duration: {})",
-                exit_code,
-                format_duration(duration)
-            )
-            .dim(),
+            Span::styled("command", Style::default().fg(theme.status.info)),
+            Span::styled(
+                format!(
+                    " (code: {}, duration: {})",
+                    exit_code,
+                    format_duration(duration)
+                ),
+                theme.dim_style(),
+            ),
         ]);
         lines.push(title_line);
 
         let src = if exit_code == 0 { stdout } else { stderr };
 
-        lines.push(Line::from(format!("$ {command}")));
-        let mut lines_iter = src.lines();
-        for raw in lines_iter.by_ref().take(TOOL_CALL_MAX_LINES) {
-            lines.push(ansi_escape_line(raw).dim());
-        }
-        let remaining = lines_iter.count();
-        if remaining > 0 {
-            lines.push(Line::from(format!("... {remaining} additional lines")).dim());
+        // Add command with better styling
+        lines.push(Line::from(vec![
+            Span::styled("$ ", theme.code_style()),
+            Span::styled(command, theme.code_style().add_modifier(Modifier::BOLD)),
+        ]));
+
+        // Add output with proper formatting
+        if !src.is_empty() {
+            let mut lines_iter = src.lines();
+            let mut _line_count = 0;
+
+            for raw in lines_iter.by_ref().take(TOOL_CALL_MAX_LINES) {
+                _line_count += 1;
+                let styled_line = if exit_code == 0 {
+                    ansi_escape_line(raw).fg(theme.status.success)
+                } else {
+                    ansi_escape_line(raw).fg(theme.status.error)
+                };
+                lines.push(styled_line);
+            }
+
+            let remaining = lines_iter.count();
+            if remaining > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("... ", theme.dim_style()),
+                    Span::styled(format!("{remaining} additional lines"), theme.dim_style()),
+                ]));
+            }
         }
         lines.push(Line::from(""));
 
@@ -302,18 +469,22 @@ impl HistoryCell {
             })
             .unwrap_or_default();
 
+        let theme = Theme::default();
         let invocation_spans = vec![
-            Span::styled(server, Style::default().fg(Color::Blue)),
+            Span::styled(server, Style::default().fg(theme.ui.selection)),
             Span::raw("."),
-            Span::styled(tool, Style::default().fg(Color::Blue)),
+            Span::styled(tool, Style::default().fg(theme.ui.selection)),
             Span::raw("("),
-            Span::styled(args_str, Style::default().fg(Color::Gray)),
+            Span::styled(args_str, theme.dim_style()),
             Span::raw(")"),
         ];
         let invocation = Line::from(invocation_spans);
 
         let start = Instant::now();
-        let title_line = Line::from(vec!["tool".magenta(), " running...".dim()]);
+        let title_line = Line::from(vec![
+            Span::styled("tool", Style::default().fg(theme.status.info)),
+            Span::styled(" running...", theme.dim_style()),
+        ]);
         let lines: Vec<Line<'static>> = vec![title_line, invocation.clone(), Line::from("")];
 
         HistoryCell::ActiveMcpToolCall {
@@ -381,17 +552,18 @@ impl HistoryCell {
             return cell;
         }
 
+        let theme = Theme::default();
         let duration = format_duration(start.elapsed());
         let status_str = if success { "success" } else { "failed" };
         let title_line = Line::from(vec![
-            "tool".magenta(),
-            " ".into(),
+            Span::styled("tool", Style::default().fg(theme.status.info)),
+            Span::raw(" "),
             if success {
-                status_str.green()
+                Span::styled(status_str, Style::default().fg(theme.status.success))
             } else {
-                status_str.red()
+                Span::styled(status_str, Style::default().fg(theme.status.error))
             },
-            format!(", duration: {duration}").gray(),
+            Span::styled(format!(", duration: {duration}"), theme.dim_style()),
         ]);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -431,7 +603,7 @@ impl HistoryCell {
                                 format!("embedded resource: {uri}")
                             }
                         };
-                        lines.push(Line::styled(line_text, Style::default().fg(Color::Gray)));
+                        lines.push(Line::styled(line_text, theme.dim_style()));
                     }
                 }
 
@@ -441,7 +613,7 @@ impl HistoryCell {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "Error: ",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        theme.emphasis_style().fg(theme.status.error),
                     ),
                     Span::raw(e),
                 ]));
@@ -455,8 +627,8 @@ impl HistoryCell {
 
     pub(crate) fn new_background_event(message: String) -> Self {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from("event".dim()));
-        lines.extend(message.lines().map(|line| ansi_escape_line(line).dim()));
+        lines.push(Line::styled("event", Style::default().fg(Color::Rgb(255, 255, 255))));
+        lines.extend(message.lines().map(|line| ansi_escape_line(line).style(Style::default().fg(Color::Rgb(255, 255, 255)))));
         lines.push(Line::from(""));
         HistoryCell::BackgroundEvent {
             view: TextBlock::new(lines),
@@ -464,11 +636,12 @@ impl HistoryCell {
     }
 
     pub(crate) fn new_diff_output(message: String) -> Self {
+        let theme = Theme::default();
         let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from("/diff".magenta()));
+        lines.push(Line::styled("/diff", Style::default().fg(theme.status.info)));
 
         if message.trim().is_empty() {
-            lines.push(Line::from("No changes detected.".italic()));
+            lines.push(Line::styled("No changes detected.", theme.dim_style().add_modifier(Modifier::ITALIC)));
         } else {
             lines.extend(message.lines().map(ansi_escape_line));
         }
@@ -480,9 +653,13 @@ impl HistoryCell {
     }
 
     pub(crate) fn new_error_event(message: String) -> Self {
+        let theme = Theme::default();
         let lines: Vec<Line<'static>> = vec![
-            vec!["ERROR: ".red().bold(), message.into()].into(),
-            "".into(),
+            Line::from(vec![
+                Span::styled("ERROR: ", theme.emphasis_style().fg(theme.status.error)),
+                Span::raw(message),
+            ]),
+            Line::from(""),
         ];
         HistoryCell::ErrorEvent {
             view: TextBlock::new(lines),
@@ -504,7 +681,8 @@ impl HistoryCell {
             PatchEventType::ApplyBegin {
                 auto_approved: false,
             } => {
-                let lines = vec![Line::from("patch applied".magenta().bold())];
+                let theme = Theme::default();
+                let lines = vec![Line::styled("patch applied", theme.emphasis_style().fg(theme.status.success))];
                 return Self::PendingPatch {
                     view: TextBlock::new(lines),
                 };
@@ -513,28 +691,29 @@ impl HistoryCell {
 
         let summary_lines = create_diff_summary(changes);
 
+        let theme = Theme::default();
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         // Header similar to the command formatter so patches are visually
         // distinct while still fitting the overall colour scheme.
-        lines.push(Line::from(title.magenta().bold()));
+        lines.push(Line::styled(title, theme.emphasis_style().fg(theme.status.info)));
 
         for line in summary_lines {
             if line.starts_with('+') {
-                lines.push(line.green().into());
+                lines.push(Line::styled(line, Style::default().fg(theme.status.success)));
             } else if line.starts_with('-') {
-                lines.push(line.red().into());
+                lines.push(Line::styled(line, Style::default().fg(theme.status.error)));
             } else if let Some(space_idx) = line.find(' ') {
                 let kind_owned = line[..space_idx].to_string();
                 let rest_owned = line[space_idx + 1..].to_string();
 
-                let style_for = |fg: Color| Style::default().fg(fg).add_modifier(Modifier::BOLD);
+                let theme = Theme::default();
 
                 let styled_kind = match kind_owned.as_str() {
-                    "A" => RtSpan::styled(kind_owned.clone(), style_for(Color::Green)),
-                    "D" => RtSpan::styled(kind_owned.clone(), style_for(Color::Red)),
-                    "M" => RtSpan::styled(kind_owned.clone(), style_for(Color::Yellow)),
-                    "R" | "C" => RtSpan::styled(kind_owned.clone(), style_for(Color::Cyan)),
+                    "A" => RtSpan::styled(kind_owned.clone(), theme.emphasis_style().fg(theme.status.success)),
+                    "D" => RtSpan::styled(kind_owned.clone(), theme.emphasis_style().fg(theme.status.error)),
+                    "M" => RtSpan::styled(kind_owned.clone(), theme.emphasis_style().fg(theme.status.warning)),
+                    "R" | "C" => RtSpan::styled(kind_owned.clone(), theme.emphasis_style().fg(theme.status.info)),
                     _ => RtSpan::raw(kind_owned.clone()),
                 };
 

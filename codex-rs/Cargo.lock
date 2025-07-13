@@ -588,6 +588,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -601,7 +602,7 @@ dependencies = [
  "codex-common",
  "codex-core",
  "codex-exec",
- "codex-linux-sandbox",
+ "codex-file-search",
  "codex-login",
  "codex-mcp-server",
  "codex-tui",
@@ -615,9 +616,12 @@ dependencies = [
 name = "codex-common"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "clap",
  "codex-core",
  "serde",
+ "serde_json",
+ "tokio",
  "toml 0.9.1",
 ]
 
@@ -630,6 +634,7 @@ dependencies = [
  "async-channel",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "codex-apply-patch",
  "codex-mcp-client",
  "dirs",
@@ -649,6 +654,7 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
+ "shell-words",
  "strum_macros 0.27.1",
  "tempfile",
  "thiserror 2.0.12",
@@ -673,7 +679,6 @@ dependencies = [
  "clap",
  "codex-common",
  "codex-core",
- "codex-linux-sandbox",
  "owo-colors",
  "serde_json",
  "shlex",
@@ -708,23 +713,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "codex-common",
  "ignore",
  "nucleo-matcher",
  "serde",
  "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "codex-linux-sandbox"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "codex-core",
- "landlock",
- "libc",
- "seccompiler",
  "tempfile",
  "tokio",
 ]
@@ -759,12 +752,13 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "codex-core",
- "codex-linux-sandbox",
+ "futures",
  "mcp-types",
  "pretty_assertions",
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.9.1",
  "tracing",
@@ -782,7 +776,6 @@ dependencies = [
  "codex-common",
  "codex-core",
  "codex-file-search",
- "codex-linux-sandbox",
  "codex-login",
  "color-eyre",
  "crossterm",
@@ -3899,6 +3892,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24188a676b6ae68c3b2cb3a01be17fbf7240ce009799bb56d5b1409051e78fde"
 
 [[package]]
 name = "shlex"

@@ -354,10 +354,25 @@ async function nonStreamResponses(
       }
     }
 
-    if (assistantMessage.content) {
+    // xAI's Grok returns the text under `text` rather than the official
+    // `content` field.  Fall back accordingly so that Codex displays the
+    // assistant's reply instead of showing an empty message.
+    const assistantText =
+      (
+        assistantMessage as Partial<
+          OpenAI.Chat.Completions.ChatCompletionMessageParam & { text?: string }
+        >
+      ).content ??
+      (
+        assistantMessage as Partial<
+          OpenAI.Chat.Completions.ChatCompletionMessageParam & { text?: string }
+        >
+      ).text;
+
+    if (assistantText) {
       outputContent.push({
         type: "output_text",
-        text: assistantMessage.content,
+        text: assistantText,
         annotations: [],
       });
     }
@@ -592,15 +607,23 @@ async function* streamResponses(
         };
         textContentAdded = true;
       }
-      if (choice.delta.content?.length) {
+      // xAI's Grok models currently (2024-07) emit the text delta under the
+      // *`text`* key rather than the official OpenAI-spec `content` field.
+      // To remain compatible with both variants we fall back to `delta.text`
+      // when `delta.content` is absent.
+      const deltaText =
+        (choice.delta as { content?: string; text?: string }).content ??
+        (choice.delta as { content?: string; text?: string }).text;
+
+      if (deltaText?.length) {
         yield {
           type: "response.output_text.delta",
           item_id: outputItemId,
           output_index: 0,
           content_index: 0,
-          delta: choice.delta.content,
+          delta: deltaText,
         };
-        textContent += choice.delta.content;
+        textContent += deltaText;
       }
       if (choice.finish_reason) {
         yield {

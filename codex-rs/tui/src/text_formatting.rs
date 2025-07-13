@@ -12,8 +12,14 @@ pub(crate) fn format_and_truncate_tool_result(
     // It also won't handle future terminal resizes properly, but it's an OK approximation for now.
     let max_graphemes = (max_lines * line_width).saturating_sub(max_lines);
 
+    // Try to format as JSON first for better readability
     if let Some(formatted_json) = format_json_compact(text) {
-        truncate_text(&formatted_json, max_graphemes)
+        // If formatted JSON is much longer than original, prefer original unless it's clearly JSON
+        if formatted_json.len() > text.len() * 2 && !text.trim_start().starts_with(['{', '[']) {
+            truncate_text(text, max_graphemes)
+        } else {
+            truncate_text(&formatted_json, max_graphemes)
+        }
     } else {
         truncate_text(text, max_graphemes)
     }

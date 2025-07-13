@@ -3,7 +3,9 @@
 // Prevent accidental direct writes to stdout/stderr in library code. All
 // user-visible output must go through the appropriate abstraction (e.g.,
 // the TUI or the tracing stack).
-#![deny(clippy::print_stdout, clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
+// Allow stderr for debug logging when CODEX_DEBUG is set
+#![cfg_attr(not(debug_assertions), deny(clippy::print_stderr))]
 
 mod chat_completions;
 mod client;
@@ -34,7 +36,9 @@ mod project_doc;
 pub mod protocol;
 mod rollout;
 mod safety;
+pub mod session_manager;
 mod user_notification;
 pub mod util;
+pub mod debug_log;
 
 pub use client_common::model_supports_reasoning_summaries;

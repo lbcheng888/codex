@@ -10,6 +10,7 @@ use codex_cli::login::run_login_with_chatgpt;
 use codex_cli::proto;
 use codex_common::CliConfigOverrides;
 use codex_exec::Cli as ExecCli;
+use codex_file_search::Cli as FileSearchCli;
 use codex_tui::Cli as TuiCli;
 use std::path::PathBuf;
 
@@ -61,6 +62,10 @@ enum Subcommand {
     /// Apply the latest diff produced by Codex agent as a `git apply` to your local working tree.
     #[clap(visible_alias = "a")]
     Apply(ApplyCommand),
+
+    /// Search for files in the current directory.
+    #[clap(visible_alias = "s")]
+    Search(FileSearchCli),
 }
 
 #[derive(Debug, Parser)]
@@ -92,8 +97,8 @@ struct LoginCommand {
 }
 
 fn main() -> anyhow::Result<()> {
-    codex_linux_sandbox::run_with_sandbox(|codex_linux_sandbox_exe| async move {
-        cli_main(codex_linux_sandbox_exe).await?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        cli_main(None).await?;
         Ok(())
     })
 }
@@ -128,24 +133,69 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         Some(Subcommand::Debug(debug_args)) => match debug_args.cmd {
             DebugCommand::Seatbelt(mut seatbelt_cli) => {
                 prepend_config_flags(&mut seatbelt_cli.config_overrides, cli.config_overrides);
-                codex_cli::debug_sandbox::run_command_under_seatbelt(
-                    seatbelt_cli,
-                    codex_linux_sandbox_exe,
-                )
-                .await?;
+                // Seatbelt functionality has been removed
             }
             DebugCommand::Landlock(mut landlock_cli) => {
                 prepend_config_flags(&mut landlock_cli.config_overrides, cli.config_overrides);
-                codex_cli::debug_sandbox::run_command_under_landlock(
-                    landlock_cli,
-                    codex_linux_sandbox_exe,
-                )
-                .await?;
+                // Landlock functionality has been removed
             }
         },
         Some(Subcommand::Apply(mut apply_cli)) => {
             prepend_config_flags(&mut apply_cli.config_overrides, cli.config_overrides);
             run_apply_command(apply_cli).await?;
+        }
+        Some(Subcommand::Search(search_cli)) => {
+            use codex_file_search::{run_main, Reporter, FileMatch};
+            use std::io::IsTerminal;
+            use codex_common::json_utils;
+            use serde_json::json;
+
+            // Create a simple reporter for CLI output
+            struct CliReporter {
+                json_output: bool,
+                show_indices: bool,
+            }
+
+            impl Reporter for CliReporter {
+                fn report_match(&self, file_match: &FileMatch) {
+                    if self.json_output {
+                        match json_utils::to_json_string(&file_match) {
+                            Ok(json_str) => println!("{}", json_str),
+                            Err(e) => eprintln!("Error serializing file match to JSON: {}", e),
+                        }
+                    } else {
+                        println!("{}", file_match.path);
+                    }
+                }
+
+                fn warn_matches_truncated(&self, total_match_count: usize, shown_match_count: usize) {
+                    if self.json_output {
+                        let value = json!({"matches_truncated": true});
+                        match json_utils::to_json_string(&value) {
+                            Ok(json_str) => println!("{}", json_str),
+                            Err(e) => eprintln!("Error serializing warning to JSON: {}", e),
+                        }
+                    } else {
+                        eprintln!(
+                            "Warning: showing {shown_match_count} out of {total_match_count} results."
+                        );
+                    }
+                }
+
+                fn warn_no_search_pattern(&self, search_directory: &std::path::Path) {
+                    eprintln!(
+                        "No search pattern specified. Showing contents of: {}",
+                        search_directory.to_string_lossy()
+                    );
+                }
+            }
+
+            let reporter = CliReporter {
+                json_output: search_cli.json,
+                show_indices: search_cli.compute_indices && std::io::stdout().is_terminal(),
+            };
+
+            run_main(search_cli, reporter).await?;
         }
     }
 

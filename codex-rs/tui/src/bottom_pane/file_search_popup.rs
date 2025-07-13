@@ -1,10 +1,8 @@
 use codex_file_search::FileMatch;
+use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Constraint;
-use ratatui::style::Color;
-use ratatui::style::Modifier;
-use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
@@ -32,6 +30,8 @@ pub(crate) struct FileSearchPopup {
     matches: Vec<FileMatch>,
     /// Currently selected index inside `matches` (if any).
     selected_idx: Option<usize>,
+    /// Theme for consistent styling
+    theme: Theme,
 }
 
 impl FileSearchPopup {
@@ -42,6 +42,7 @@ impl FileSearchPopup {
             waiting: true,
             matches: Vec::new(),
             selected_idx: None,
+            theme: Theme::default(),
         }
     }
 
@@ -128,7 +129,7 @@ impl WidgetRef for &FileSearchPopup {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         // Prepare rows.
         let rows: Vec<Row> = if self.matches.is_empty() {
-            vec![Row::new(vec![Cell::from(" no matches ")])]
+            vec![Row::new(vec![Cell::from(" no matches ").style(self.theme.dim_style())])]
         } else {
             self.matches
                 .iter()
@@ -145,23 +146,24 @@ impl WidgetRef for &FileSearchPopup {
                     let mut spans: Vec<Span> = Vec::with_capacity(path.len());
 
                     for (char_idx, ch) in path.chars().enumerate() {
-                        let mut style = Style::default();
-                        if idx_iter
+                        let style = if idx_iter
                             .peek()
                             .is_some_and(|next| **next == char_idx as u32)
                         {
                             idx_iter.next();
-                            style = style.add_modifier(Modifier::BOLD);
-                        }
+                            self.theme.emphasis_style()
+                        } else {
+                            self.theme.inactive_item_style()
+                        };
                         spans.push(Span::styled(ch.to_string(), style));
                     }
 
                     // Create cell from the spans.
                     let mut cell = Cell::from(Line::from(spans));
 
-                    // If selected, also paint yellow.
+                    // If selected, apply active item style.
                     if Some(i) == self.selected_idx {
-                        cell = cell.style(Style::default().fg(Color::Yellow));
+                        cell = cell.style(self.theme.active_item_style());
                     }
 
                     Row::new(vec![cell])
@@ -179,7 +181,9 @@ impl WidgetRef for &FileSearchPopup {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title(title),
+                    .title(title)
+                    .border_style(self.theme.popup_border_style())
+                    .style(self.theme.popup_background_style()),
             )
             .widths([Constraint::Percentage(100)]);
 

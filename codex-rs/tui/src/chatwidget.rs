@@ -25,6 +25,11 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::widgets::Block;
+use ratatui::widgets::BorderType;
+use ratatui::widgets::Borders;
+use ratatui::widgets::Clear;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
@@ -37,6 +42,8 @@ use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::InputResult;
 use crate::conversation_history_widget::ConversationHistoryWidget;
 use crate::history_cell::PatchEventType;
+use crate::keyboard_help_widget::KeyboardHelpWidget;
+use crate::theme::Theme;
 use crate::user_approval_widget::ApprovalRequest;
 use codex_file_search::FileMatch;
 
@@ -49,9 +56,12 @@ pub(crate) struct ChatWidget<'a> {
     config: Config,
     initial_user_message: Option<UserMessage>,
     token_usage: TokenUsage,
+    theme: Theme,
+    help_widget: KeyboardHelpWidget,
+    show_help: bool,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 enum InputFocus {
     HistoryPane,
     BottomPane,
@@ -92,11 +102,27 @@ impl ChatWidget<'_> {
         // Create the Codex asynchronously so the UI loads as quickly as possible.
         let config_for_agent_loop = config.clone();
         tokio::spawn(async move {
+            // DEBUG: Environment verification in TUI context
+            if std::env::var("CODEX_DEBUG").is_ok() {
+                eprintln!("[DEBUG TUI] ChatWidget spawning init_codex task");
+                eprintln!("[DEBUG TUI] Environment in TUI context:");
+                eprintln!("[DEBUG TUI]   CODEX_DEBUG = {:?}", std::env::var("CODEX_DEBUG"));
+                eprintln!("[DEBUG TUI]   XAI_API_KEY = {:?}", std::env::var("XAI_API_KEY").map(|_| "***SET***"));
+            }
+            
             let (codex, session_event, _ctrl_c) = match init_codex(config_for_agent_loop).await {
-                Ok(vals) => vals,
+                Ok(vals) => {
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG TUI] init_codex succeeded");
+                    }
+                    vals
+                },
                 Err(e) => {
                     // TODO: surface this error to the user.
                     tracing::error!("failed to initialize codex: {e}");
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG TUI] ERROR: init_codex failed: {}", e);
+                    }
                     return;
                 }
             };
@@ -108,9 +134,17 @@ impl ChatWidget<'_> {
             let codex_clone = codex.clone();
             tokio::spawn(async move {
                 while let Some(op) = codex_op_rx.recv().await {
+                    if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG TUI] Submitting op: {:?}", std::mem::discriminant(&op));
+                    }
                     let id = codex_clone.submit(op).await;
                     if let Err(e) = id {
                         tracing::error!("failed to submit op: {e}");
+                        if std::env::var("CODEX_DEBUG").is_ok() {
+                            eprintln!("[DEBUG TUI] ERROR: Failed to submit op: {}", e);
+                        }
+                    } else if std::env::var("CODEX_DEBUG").is_ok() {
+                        eprintln!("[DEBUG TUI] Op submitted successfully with id: {:?}", id);
                     }
                 }
             });
@@ -120,10 +154,11 @@ impl ChatWidget<'_> {
             }
         });
 
+        let theme = Theme::default();
         Self {
             app_event_tx: app_event_tx.clone(),
             codex_op_tx,
-            conversation_history: ConversationHistoryWidget::new(),
+            conversation_history: ConversationHistoryWidget::with_theme(theme.clone()),
             bottom_pane: BottomPane::new(BottomPaneParams {
                 app_event_tx,
                 has_input_focus: true,
@@ -135,29 +170,79 @@ impl ChatWidget<'_> {
                 initial_images,
             ),
             token_usage: TokenUsage::default(),
+            help_widget: KeyboardHelpWidget::new(),
+            show_help: false,
+            theme,
         }
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
         self.bottom_pane.clear_ctrl_c_quit_hint();
+        
+        // Handle F1 and ? keys to toggle keyboard help
+        match key_event.code {
+            crossterm::event::KeyCode::F(1) => {
+                self.show_help = !self.show_help;
+                self.request_redraw();
+                return;
+            }
+            crossterm::event::KeyCode::Char('?') => {
+                self.show_help = !self.show_help;
+                self.request_redraw();
+                return;
+            }
+            _ => {}
+        }
+
+        // If help is shown and any other key is pressed, hide help
+        if self.show_help {
+            self.show_help = false;
+            self.request_redraw();
+            return;
+        }
+        
         // Special-case <Tab>: normally toggles focus between history and bottom panes.
         // However, when the slash-command popup is visible we forward the key
         // to the bottom pane so it can handle auto-completion.
         if matches!(key_event.code, crossterm::event::KeyCode::Tab)
             && !self.bottom_pane.is_popup_visible()
         {
+            // Toggle focus with smooth transition
+            let old_focus = self.input_focus;
             self.input_focus = match self.input_focus {
                 InputFocus::HistoryPane => InputFocus::BottomPane,
                 InputFocus::BottomPane => InputFocus::HistoryPane,
             };
+            
+            // Update focus state for both components
             self.conversation_history
                 .set_input_focus(self.input_focus == InputFocus::HistoryPane);
             self.bottom_pane
                 .set_input_focus(self.input_focus == InputFocus::BottomPane);
+            
+            // Always redraw when focus changes for immediate visual feedback
             self.request_redraw();
+            
+            // Log focus change for debugging if needed
+            if std::env::var("CODEX_DEBUG").is_ok() {
+                eprintln!("[DEBUG TUI] Focus changed from {:?} to {:?}", old_focus, self.input_focus);
+            }
             return;
         }
 
+        // Handle Escape key to provide easy focus reset
+        if matches!(key_event.code, crossterm::event::KeyCode::Esc) {
+            // Reset focus to bottom pane for easier typing
+            if self.input_focus != InputFocus::BottomPane {
+                self.input_focus = InputFocus::BottomPane;
+                self.conversation_history.set_input_focus(false);
+                self.bottom_pane.set_input_focus(true);
+                self.request_redraw();
+                return;
+            }
+        }
+
+        // Route key events to the appropriate pane
         match self.input_focus {
             InputFocus::HistoryPane => {
                 let needs_redraw = self.conversation_history.handle_key_event(key_event);
@@ -168,6 +253,8 @@ impl ChatWidget<'_> {
             InputFocus::BottomPane => match self.bottom_pane.handle_key_event(key_event) {
                 InputResult::Submitted(text) => {
                     self.submit_user_message(text.into());
+                    // After submission, keep focus in bottom pane for continued interaction
+                    self.request_redraw();
                 }
                 InputResult::None => {}
             },
@@ -177,6 +264,11 @@ impl ChatWidget<'_> {
     fn submit_user_message(&mut self, user_message: UserMessage) {
         let UserMessage { text, image_paths } = user_message;
         let mut items: Vec<InputItem> = Vec::new();
+
+        // DEBUG: Log user message submission
+        if std::env::var("CODEX_DEBUG").is_ok() {
+            eprintln!("[DEBUG TUI] User message submitted: text='{}', images={}", text, image_paths.len());
+        }
 
         if !text.is_empty() {
             items.push(InputItem::Text { text: text.clone() });
@@ -188,6 +280,11 @@ impl ChatWidget<'_> {
 
         if items.is_empty() {
             return;
+        }
+
+        // DEBUG: Log Op::UserInput submission
+        if std::env::var("CODEX_DEBUG").is_ok() {
+            eprintln!("[DEBUG TUI] Sending Op::UserInput with {} items", items.len());
         }
 
         self.codex_op_tx
@@ -436,15 +533,100 @@ impl ChatWidget<'_> {
 
 impl WidgetRef for &ChatWidget<'_> {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let bottom_height = self.bottom_pane.calculate_required_height(&area);
+        // Clear the entire area first for clean rendering
+        Clear.render(area, buf);
 
+        let bottom_height = self.bottom_pane.calculate_required_height(&area);
+        
+        // Add a minimum margin to prevent layout issues
+        let safe_bottom_height = bottom_height.min(area.height.saturating_sub(5));
+        
+        // Create layout with refined spacing for Claude-like interface
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(bottom_height)])
+            .constraints([
+                Constraint::Min(0),                    // History pane (flexible)
+                Constraint::Length(1),                 // Subtle separator line
+                Constraint::Length(safe_bottom_height), // Bottom pane (fixed)
+            ])
+            .margin(0)  // Remove default margins for cleaner look
             .split(area);
 
+        // Render conversation history in the top pane
         self.conversation_history.render(chunks[0], buf);
-        (&self.bottom_pane).render(chunks[1], buf);
+        
+        // Render very subtle separator between panes
+        if chunks.len() > 1 {
+            let separator_style = if self.input_focus == InputFocus::HistoryPane {
+                // Show subtle focus indicator on the separator when history is focused
+                Style::default().fg(self.theme.ui.border_focused)
+            } else {
+                // Ultra-subtle separator line when bottom pane is focused
+                self.theme.separator_style()
+            };
+            
+            // Use a minimal separator design
+            Block::default()
+                .borders(Borders::TOP)
+                .border_type(BorderType::Plain)
+                .border_style(separator_style)
+                .render(chunks[1], buf);
+        }
+        
+        // Render bottom pane
+        if chunks.len() > 2 {
+            (&self.bottom_pane).render(chunks[2], buf);
+        }
+        
+        // Add focus indicator overlay for better UX
+        self.render_focus_indicator(area, buf);
+        
+        // Render keyboard help overlay if shown
+        if self.show_help {
+            (&self.help_widget).render_ref(area, buf);
+        }
+    }
+}
+
+impl ChatWidget<'_> {
+    /// Render a Claude Code-style focus indicator to help users understand which pane is active
+    fn render_focus_indicator(&self, area: Rect, buf: &mut Buffer) {
+        // Only show focus indicator when it would be helpful
+        if area.width < 40 || area.height < 8 {
+            return; // Skip on very small screens
+        }
+        
+        // Create a more subtle and modern focus indicator
+        let indicator_width = 12;
+        let indicator_rect = Rect {
+            x: area.x + area.width.saturating_sub(indicator_width + 2),
+            y: area.y + 1, // Position below top margin
+            width: indicator_width,
+            height: 1,
+        };
+        
+        if indicator_rect.width > 0 && indicator_rect.height > 0 {
+            let (indicator_text, indicator_style) = match self.input_focus {
+                InputFocus::HistoryPane => (
+                    " HISTORY ",
+                    self.theme.focus_indicator_style().fg(self.theme.status.info)
+                ),
+                InputFocus::BottomPane => (
+                    " INPUT   ",
+                    self.theme.focus_indicator_style().fg(self.theme.status.success)
+                ),
+            };
+            
+            // Only render if there's enough space
+            if indicator_text.len() <= indicator_width as usize {
+                use ratatui::text::Span;
+                use ratatui::text::Line;
+                use ratatui::widgets::Paragraph;
+                
+                Paragraph::new(Line::from(Span::styled(indicator_text, indicator_style)))
+                    .render(indicator_rect, buf);
+            }
+        }
     }
 }
 
