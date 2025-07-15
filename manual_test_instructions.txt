@@ -1,0 +1,1 @@
+请在另一个终端运行: CODEX_DEBUG=1 codex-tui --profile xai --model grok-4-0709
