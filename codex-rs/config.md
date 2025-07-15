@@ -472,14 +472,15 @@ Options that are specific to the TUI.
 
 ```toml
 [tui]
-# This will make it so that Codex does not try to process mouse events, which
-# means your Terminal's native drag-to-text to text selection and copy/paste
-# should work. The tradeoff is that Codex will not receive any mouse events, so
-# it will not be possible to use the mouse to scroll conversation history.
+# Disable mouse capture so that your terminal continues to handle mouse events
+# natively – this gives you "click-and-drag to select/copy" straight out of the
+# box.  The trade-off is that the TUI will no longer receive mouse scroll
+# events, though you can still navigate with the keyboard using `b`, `space`,
+# and the arrow keys.
 #
-# Note that most terminals support holding down a modifier key when using the
-# mouse to support text selection. For example, even if Codex mouse capture is
-# enabled (i.e., this is set to `false`), you can still hold down alt while
-# dragging the mouse to select text.
-disable_mouse_capture = true  # defaults to `false`
+# Most terminal emulators let you *temporarily* disable mouse capture by
+# holding a modifier key (e.g. `Shift` or `Alt`) while selecting text.  With
+# the new default you no longer need this workaround, but you can always flip
+# the flag back to `false` if you prefer the old behaviour.
+disable_mouse_capture = true  # defaults to `true`
 ```
