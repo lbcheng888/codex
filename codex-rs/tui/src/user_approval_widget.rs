@@ -321,7 +321,12 @@ impl UserApprovalWidget<'_> {
 }
 
 const PLAIN: Style = Style::new();
-const BLUE_FG: Style = Style::new().fg(Color::Blue);
+// Use the accent color from the global theme instead of the hard-coded
+// `Color::Blue` to stay visually consistent with the rest of the TUI. The RGB
+// values are kept in-line here to avoid pulling the full `Theme` object into
+// this file just for a single color.
+// (Matches `Theme::claude_inspired().primary.accent`)
+const ACCENT_FG: Style = Style::new().fg(Color::Rgb(247, 144, 61));
 
 impl WidgetRef for &UserApprovalWidget<'_> {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
@@ -350,7 +355,7 @@ impl WidgetRef for &UserApprovalWidget<'_> {
                 .enumerate()
                 .map(|(idx, opt)| {
                     let (prefix, style) = if idx == self.selected_option {
-                        ("▶", BLUE_FG)
+                        ("▶", ACCENT_FG)
                     } else {
                         (" ", PLAIN)
                     };

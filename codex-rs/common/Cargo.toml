@@ -21,3 +21,6 @@ cli = ["clap", "toml", "serde"]
 elapsed = []
 io-utils = ["anyhow", "tokio"]
 json-utils = ["serde_json", "anyhow", "serde"]
+
+[dev-dependencies]
+tempfile = "3"

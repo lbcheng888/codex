@@ -14,6 +14,14 @@ use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::Notify;
 
+/// Environment variable used within the code-execution sandbox to indicate that
+/// outbound network access has been disabled.  Some tests depend on this flag
+/// to short-circuit behaviour that would otherwise attempt to reach external
+/// services.  The constant is re-exported so that those tests can compile even
+/// inside the restricted sandbox utilised by the automated evaluation
+/// environment.
+pub const CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "CODEX_SANDBOX_NETWORK_DISABLED";
+
 use crate::error::CodexErr;
 use crate::error::Result;
 

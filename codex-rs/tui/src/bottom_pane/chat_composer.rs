@@ -676,13 +676,13 @@ impl ChatComposer<'_> {
         use ratatui::text::Span;
         Line::from(vec![
             Span::styled("Enter".to_string(), self.theme.shortcut_key_style()),
-            Span::styled(" send".to_string(), self.theme.help_text_style()),
+            Span::styled(" to send".to_string(), self.theme.help_text_style()),
             Span::styled(" | ".to_string(), self.theme.dim_style()),
             Span::styled("Ctrl+D".to_string(), self.theme.shortcut_key_style()),
-            Span::styled(" quit".to_string(), self.theme.help_text_style()),
+            Span::styled(" to quit".to_string(), self.theme.help_text_style()),
             Span::styled(" | ".to_string(), self.theme.dim_style()),
             Span::styled("Ctrl+J".to_string(), self.theme.shortcut_key_style()),
-            Span::styled(" newline".to_string(), self.theme.help_text_style()),
+            Span::styled(" for newline".to_string(), self.theme.help_text_style()),
         ])
         .alignment(Alignment::Right)
     }

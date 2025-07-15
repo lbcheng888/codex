@@ -31,7 +31,7 @@ impl CellWidget for TextBlock {
             for span in &line.spans {
                 let mut style = span.style;
                 // Force bright white text for all content
-                style.fg = Some(Color::Rgb(245, 245, 245));
+                style.fg = Some(Color::White);
                 styled_spans.push(Span::styled(span.content.clone(), style));
             }
             styled_lines.push(Line::from(styled_spans));

@@ -107,7 +107,13 @@ impl Theme {
         let (bg_main, fg_main) = if high_contrast {
             (Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255))  // Pure black bg, pure white fg
         } else {
-            (Color::Rgb(13, 13, 13), Color::Rgb(250, 250, 250))  // Claude Code exact dark background
+            // Use the terminal's canonical `Color::White` constant instead of an
+            // RGB approximation so that terminals limited to 8/16 colours map
+            // it to bright-white (colour 15) instead of a dull light-grey.  A
+            // custom `Rgb(250,250,250)` often degrades to colour 7 (grey) in
+            // such terminals, which explains the “history panel looks grey”
+            // issue that users have reported.
+            (Color::Rgb(13, 13, 13), Color::White)
         };
 
         Self {
@@ -120,12 +126,12 @@ impl Theme {
             messages: ThemeMessages {
                 user: MessageColors {
                     background: if high_contrast { Color::Rgb(25, 25, 25) } else { Color::Rgb(28, 28, 28) },
-                    foreground: Color::Rgb(250, 250, 250), // Claude Code white
+                    foreground: Color::White, // bright white for maximum contrast
                     border: Color::Rgb(79, 172, 254),     // Claude blue for user messages
                 },
                 assistant: MessageColors {
                     background: if high_contrast { Color::Rgb(18, 18, 18) } else { Color::Rgb(22, 22, 22) },
-                    foreground: Color::Rgb(250, 250, 250), // Claude Code white
+                    foreground: Color::White,
                     border: Color::Rgb(247, 144, 61),     // Claude orange for assistant messages
                 },
                 system: MessageColors {

@@ -81,6 +81,12 @@ pub struct ConversationHistoryWidget {
     mouse_dragging: bool,
     /// Last rendered area for mouse coordinate conversion
     last_render_area: StdCell<Rect>,
+
+    /// Remember the last observed mouse coordinates while dragging so we can
+    /// continue updating the selection even when the user scrolls beyond the
+    /// current viewport ("autoscroll while selecting").
+    last_mouse_x: StdCell<u16>,
+    last_mouse_y: StdCell<u16>,
 }
 
 impl ConversationHistoryWidget {
@@ -101,6 +107,9 @@ impl ConversationHistoryWidget {
             selection: TextSelection::new(),
             mouse_dragging: false,
             last_render_area: StdCell::new(Rect::default()),
+
+            last_mouse_x: StdCell::new(0),
+            last_mouse_y: StdCell::new(0),
         }
     }
 
@@ -322,6 +331,11 @@ impl ConversationHistoryWidget {
                     self.selection.end = pos;
                     self.selection.active = true;
                     self.mouse_dragging = true;
+
+                    // Remember coordinates so we can keep updating the
+                    // selection while the user scrolls with the wheel.
+                    self.last_mouse_x.set(mouse_event.column);
+                    self.last_mouse_y.set(mouse_event.row);
                     return true;
                 }
             }
@@ -330,6 +344,11 @@ impl ConversationHistoryWidget {
                 if self.mouse_dragging {
                     if let Some(pos) = self.mouse_to_text_position(mouse_event.column, mouse_event.row, area) {
                         self.selection.end = pos;
+
+                        // Update last known coordinates so autoscroll keeps
+                        // using the latest pointer location.
+                        self.last_mouse_x.set(mouse_event.column);
+                        self.last_mouse_y.set(mouse_event.row);
                         return true;
                     }
                 }
@@ -337,6 +356,19 @@ impl ConversationHistoryWidget {
             MouseEventKind::Up(MouseButton::Left) => {
                 // End selection
                 self.mouse_dragging = false;
+
+                // When the user finishes a drag-selection with the left mouse
+                // button, automatically copy the selected text to the system
+                // clipboard.  This matches the behaviour of many terminal
+                // emulators where releasing the mouse button after selecting
+                // text implicitly places the text into the clipboard.
+                if self.selection.active {
+                    if let Some(selected_text) = self.get_selected_text() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(selected_text);
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -456,6 +488,19 @@ impl ConversationHistoryWidget {
             std::cmp::Ordering::Less => self.scroll_up(-delta as u32),
             std::cmp::Ordering::Greater => self.scroll_down(delta as u32),
             std::cmp::Ordering::Equal => {}
+        }
+
+        // While the user is dragging a selection, keep the selection’s end
+        // anchored to the cursor’s (potentially off-screen) position so they
+        // can extend the selection by scrolling.
+        if self.mouse_dragging && self.selection.active {
+            let area = self.last_render_area.get();
+            let x = self.last_mouse_x.get();
+            let y = self.last_mouse_y.get();
+
+            if let Some(pos) = self.mouse_to_text_position(x, y, area) {
+                self.selection.end = pos;
+            }
         }
     }
 
@@ -839,10 +884,11 @@ impl WidgetRef for ConversationHistoryWidget {
         Clear.render(area, buf);
         
         // Ensure the background uses the theme's background color
-        let background_style = Style::default().bg(self.theme.primary.background);
-        Block::default()
-            .style(background_style)
-            .render(area, buf);
+        // Avoid painting a solid background so the widget inherits the
+        // terminal’s default colours.  This prevents the “full-screen blue
+        // backdrop” effect and lets users copy text without the coloured
+        // cells bleeding into their clipboard in some terminals.
+        Block::default().render(area, buf);
 
         // No border to render - proceed directly to content
 

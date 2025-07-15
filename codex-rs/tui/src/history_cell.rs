@@ -143,7 +143,9 @@ fn create_message_bubble(
     
     // Clean styling without borders
     let header_style = theme.message_header_style(is_user);
-    let content_style = Style::default().fg(Color::Rgb(250, 250, 250)); // Bright white for content
+    // Use pure terminal white to ensure maximum brightness even on 16-color
+    // terminals where custom RGB values are approximated to dull gray.
+    let content_style = Style::default().fg(Color::White);
     
     // Simple header line
     lines.push(Line::from(vec![
@@ -191,7 +193,7 @@ fn create_agent_message_bubble(
             // Use bright white for text content, preserve other styling
             if new_style.fg.is_none() || 
                (new_style.fg == Some(Color::Rgb(255, 255, 255))) {
-                new_style.fg = Some(Color::Rgb(250, 250, 250)); // Bright white
+                new_style.fg = Some(Color::White);
             }
             Span::styled(span.content, new_style)
         }).collect();
@@ -237,7 +239,7 @@ fn create_reasoning_message_bubble(
                 // Use bright white for content, preserve other styling
                 if new_style.fg.is_none() || 
                    (new_style.fg == Some(Color::Rgb(255, 255, 255))) {
-                    new_style.fg = Some(Color::Rgb(250, 250, 250)); // Bright white
+                new_style.fg = Some(Color::White);
                 }
                 Span::styled(span.content, new_style)
             })

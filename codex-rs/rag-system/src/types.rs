@@ -13,7 +13,7 @@ pub struct CodeUnit {
     pub imports: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
     Rust,
     Kotlin,

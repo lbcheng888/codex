@@ -724,6 +724,7 @@ dependencies = [
  "codex-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.9.1",
 ]
@@ -3580,6 +3581,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower-http 0.5.2",
  "tracing",

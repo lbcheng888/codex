@@ -41,13 +41,13 @@ fn append_markdown_with_opener_and_cwd(
             // Create a new owned String for the span's content to break the lifetime link.
             // Force bright white text to override any default markdown styling
             let mut style = span.style;
-            style.fg = Some(Color::Rgb(245, 245, 245)); // Bright white
+            style.fg = Some(Color::White);
             let owned_span = Span::styled(span.content.to_string(), style);
             owned_spans.push(owned_span);
         }
 
         let mut owned_line: Line<'static> = Line::from(owned_spans).style(borrowed_line.style);
-        owned_line.style.fg = Some(Color::Rgb(245, 245, 245)); // Ensure line is white
+        owned_line.style.fg = Some(Color::White);
         // Preserve alignment if it was set on the source line.
         let owned_line = match borrowed_line.alignment {
             Some(alignment) => owned_line.alignment(alignment),

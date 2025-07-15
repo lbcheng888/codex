@@ -50,8 +50,11 @@ impl CodeParser {
         for entry in walker {
             if let Ok(entry) = entry {
                 let path = entry.path();
-                if self.should_include_file(path) {
-                    files.push(path.to_path_buf());
+                // Only include regular files (skip directories, symlinks to dirs, etc.)
+                if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                    if self.should_include_file(path) {
+                        files.push(path.to_path_buf());
+                    }
                 }
             }
         }
@@ -246,7 +249,7 @@ impl Default for CodeParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_discover_files() {
