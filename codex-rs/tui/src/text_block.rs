@@ -24,18 +24,18 @@ impl CellWidget for TextBlock {
     }
 
     fn render_window(&self, first_visible_line: usize, area: Rect, buf: &mut Buffer) {
-        // Ensure all text content is bright white by default
-        let styled_lines: Vec<Line<'_>> = self.lines.iter().map(|line| {
-            let styled_spans: Vec<Span<'_>> = line.spans.iter().map(|span| {
+        // Create a new Paragraph with bright white text as default
+        let mut styled_lines = Vec::new();
+        for line in &self.lines {
+            let mut styled_spans = Vec::new();
+            for span in &line.spans {
                 let mut style = span.style;
-                // If no foreground color is set, use bright white
-                if style.fg.is_none() {
-                    style.fg = Some(Color::Rgb(245, 245, 245));
-                }
-                Span::styled(&span.content, style)
-            }).collect();
-            Line::from(styled_spans)
-        }).collect();
+                // Force bright white text for all content
+                style.fg = Some(Color::Rgb(245, 245, 245));
+                styled_spans.push(Span::styled(span.content.clone(), style));
+            }
+            styled_lines.push(Line::from(styled_spans));
+        }
 
         ratatui::widgets::Paragraph::new(styled_lines)
             .wrap(crate::conversation_history_widget::wrap_cfg())

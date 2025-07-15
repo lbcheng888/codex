@@ -85,34 +85,23 @@ impl<'a> App<'a> {
                         crossterm::event::Event::Resize(_, _) => {
                             app_event_tx.send(AppEvent::Redraw);
                         }
-                        crossterm::event::Event::Mouse(MouseEvent {
-                            kind: MouseEventKind::ScrollUp,
-                            ..
-                        }) => {
-                            scroll_event_helper.scroll_up();
-                        }
-                        crossterm::event::Event::Mouse(MouseEvent {
-                            kind: MouseEventKind::ScrollDown,
-                            ..
-                        }) => {
-                            scroll_event_helper.scroll_down();
+                        crossterm::event::Event::Mouse(mouse_event) => {
+                            // Handle scroll events separately for backward compatibility
+                            match mouse_event.kind {
+                                MouseEventKind::ScrollUp => {
+                                    scroll_event_helper.scroll_up();
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    scroll_event_helper.scroll_down();
+                                }
+                                _ => {
+                                    // Forward all other mouse events
+                                    app_event_tx.send(AppEvent::MouseEvent(mouse_event));
+                                }
+                            }
                         }
                         crossterm::event::Event::Paste(pasted) => {
-                            use crossterm::event::KeyModifiers;
-
-                            for ch in pasted.chars() {
-                                let key_event = match ch {
-                                    '\n' | '\r' => {
-                                        // Represent newline as <Shift+Enter> so that the bottom
-                                        // pane treats it as a literal newline instead of a submit
-                                        // action (submission is only triggered on Enter *without*
-                                        // any modifiers).
-                                        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
-                                    }
-                                    _ => KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
-                                };
-                                app_event_tx.send(AppEvent::KeyEvent(key_event));
-                            }
+                            app_event_tx.send(AppEvent::Paste(pasted));
                         }
                         _ => {
                             // Ignore any other events.
@@ -222,6 +211,12 @@ impl<'a> App<'a> {
                 }
                 AppEvent::Scroll(scroll_delta) => {
                     self.dispatch_scroll_event(scroll_delta);
+                }
+                AppEvent::MouseEvent(mouse_event) => {
+                    self.dispatch_mouse_event(mouse_event);
+                }
+                AppEvent::Paste(text) => {
+                    self.dispatch_paste_event(text);
                 }
                 AppEvent::CodexEvent(event) => {
                     self.dispatch_codex_event(event);
@@ -340,6 +335,20 @@ impl<'a> App<'a> {
                     // do nothing
                 }
             },
+        }
+    }
+
+    fn dispatch_mouse_event(&mut self, mouse_event: MouseEvent) {
+        match &mut self.app_state {
+            AppState::Chat { widget } => widget.handle_mouse_event(mouse_event),
+            AppState::Login { .. } | AppState::GitWarning { .. } => {}
+        }
+    }
+
+    fn dispatch_paste_event(&mut self, pasted: String) {
+        match &mut self.app_state {
+            AppState::Chat { widget } => widget.handle_paste(pasted),
+            AppState::Login { .. } | AppState::GitWarning { .. } => {}
         }
     }
 

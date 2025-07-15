@@ -20,6 +20,7 @@ use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TokenUsage;
 use crossterm::event::KeyEvent;
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
@@ -258,6 +259,19 @@ impl ChatWidget<'_> {
                 }
                 InputResult::None => {}
             },
+        }
+    }
+
+    pub(crate) fn handle_paste(&mut self, text: String) {
+        if matches!(self.input_focus, InputFocus::BottomPane) {
+            self.bottom_pane.handle_paste(text);
+        }
+    }
+
+    pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        // Forward mouse events to the conversation history if it has focus
+        if matches!(self.input_focus, InputFocus::HistoryPane) {
+            self.conversation_history.handle_mouse_event(mouse_event);
         }
     }
 

@@ -331,13 +331,20 @@ impl HistoryCell {
     pub(crate) fn new_user_prompt(message: String) -> Self {
         let theme = Theme::default();
         
-        // Convert message to lines for bubble creation
+        // Convert message to lines for bubble creation with white text
         let content_lines: Vec<String> = message.lines()
             .map(|line| line.to_string())
             .collect();
         
-        // Create modern bubble design
-        let lines = create_message_bubble(&theme, "user".to_string(), content_lines, true);
+        // Create modern bubble design with white text
+        let mut lines = create_message_bubble(&theme, "user".to_string(), content_lines, true);
+        
+        // Ensure all text is white
+        for line in &mut lines {
+            for span in &mut line.spans {
+                span.style.fg = Some(Color::Rgb(245, 245, 245));
+            }
+        }
 
         HistoryCell::UserPrompt {
             view: TextBlock::new(lines),
@@ -349,7 +356,14 @@ impl HistoryCell {
         
         // For assistant messages, we need to handle markdown specially
         // Create a modern bubble with markdown content
-        let lines = create_agent_message_bubble(&theme, "codex".to_string(), &message, config);
+        let mut lines = create_agent_message_bubble(&theme, "codex".to_string(), &message, config);
+        
+        // Ensure all text is white
+        for line in &mut lines {
+            for span in &mut line.spans {
+                span.style.fg = Some(Color::Rgb(245, 245, 245));
+            }
+        }
 
         HistoryCell::AgentMessage {
             view: TextBlock::new(lines),
@@ -360,7 +374,14 @@ impl HistoryCell {
         let theme = Theme::default();
         
         // Create a special reasoning bubble with distinctive styling
-        let lines = create_reasoning_message_bubble(&theme, "thinking".to_string(), &text, config);
+        let mut lines = create_reasoning_message_bubble(&theme, "thinking".to_string(), &text, config);
+        
+        // Ensure all text is white
+        for line in &mut lines {
+            for span in &mut line.spans {
+                span.style.fg = Some(Color::Rgb(245, 245, 245));
+            }
+        }
 
         HistoryCell::AgentReasoning {
             view: TextBlock::new(lines),
@@ -627,8 +648,8 @@ impl HistoryCell {
 
     pub(crate) fn new_background_event(message: String) -> Self {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::styled("event", Style::default().fg(Color::Rgb(255, 255, 255))));
-        lines.extend(message.lines().map(|line| ansi_escape_line(line).style(Style::default().fg(Color::Rgb(255, 255, 255)))));
+        lines.push(Line::styled("event", Style::default().fg(Color::Rgb(245, 245, 245))));
+        lines.extend(message.lines().map(|line| ansi_escape_line(line).style(Style::default().fg(Color::Rgb(245, 245, 245)))));
         lines.push(Line::from(""));
         HistoryCell::BackgroundEvent {
             view: TextBlock::new(lines),
@@ -657,7 +678,7 @@ impl HistoryCell {
         let lines: Vec<Line<'static>> = vec![
             Line::from(vec![
                 Span::styled("ERROR: ", theme.emphasis_style().fg(theme.status.error)),
-                Span::raw(message),
+                Span::styled(message, Style::default().fg(Color::Rgb(245, 245, 245))),
             ]),
             Line::from(""),
         ];

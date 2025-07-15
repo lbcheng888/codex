@@ -8,6 +8,10 @@ use codex_core::protocol::FileChange;
 use codex_core::protocol::SessionConfiguredEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::KeyModifiers;
+use crossterm::event::MouseButton;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use ratatui::prelude::*;
 use ratatui::style::Style;
 use ratatui::widgets::*;
@@ -23,6 +27,41 @@ struct Entry {
     line_count: Cell<usize>,
 }
 
+/// Text selection state
+#[derive(Clone, Debug)]
+struct TextSelection {
+    /// Start position (entry_index, line_within_entry, column)
+    start: (usize, usize, usize),
+    /// End position (entry_index, line_within_entry, column)
+    end: (usize, usize, usize),
+    /// Whether selection is active
+    active: bool,
+}
+
+/// Direction for selection updates
+enum SelectionDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl TextSelection {
+    fn new() -> Self {
+        Self {
+            start: (0, 0, 0),
+            end: (0, 0, 0),
+            active: false,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.active = false;
+        self.start = (0, 0, 0);
+        self.end = (0, 0, 0);
+    }
+}
+
 pub struct ConversationHistoryWidget {
     entries: Vec<Entry>,
     /// The width (in terminal cells/columns) that [`Entry::line_count`] was
@@ -36,6 +75,12 @@ pub struct ConversationHistoryWidget {
     has_input_focus: bool,
     /// Theme for consistent styling
     theme: Theme,
+    /// Text selection state
+    selection: TextSelection,
+    /// Mouse state for drag selection
+    mouse_dragging: bool,
+    /// Last rendered area for mouse coordinate conversion
+    last_render_area: StdCell<Rect>,
 }
 
 impl ConversationHistoryWidget {
@@ -53,15 +98,337 @@ impl ConversationHistoryWidget {
             last_viewport_height: StdCell::new(0),
             has_input_focus: false,
             theme,
+            selection: TextSelection::new(),
+            mouse_dragging: false,
+            last_render_area: StdCell::new(Rect::default()),
         }
     }
 
     pub(crate) fn set_input_focus(&mut self, has_input_focus: bool) {
         self.has_input_focus = has_input_focus;
+        // Clear selection when losing focus
+        if !has_input_focus {
+            self.selection.clear();
+        }
+    }
+
+    /// Get the selected text content
+    pub(crate) fn get_selected_text(&self) -> Option<String> {
+        if !self.selection.active {
+            return None;
+        }
+
+        let mut selected_text = String::new();
+        let width = self.cached_width.get();
+        
+        // Normalize selection bounds
+        let (start_entry, start_line, start_col) = self.selection.start;
+        let (end_entry, end_line, end_col) = self.selection.end;
+        
+        let (start_entry, start_line, start_col, end_entry, end_line, end_col) = 
+            if (start_entry, start_line, start_col) <= (end_entry, end_line, end_col) {
+                (start_entry, start_line, start_col, end_entry, end_line, end_col)
+            } else {
+                (end_entry, end_line, end_col, start_entry, start_line, start_col)
+            };
+
+        // Iterate through entries and extract selected text
+        for (entry_idx, entry) in self.entries.iter().enumerate() {
+            if entry_idx < start_entry || entry_idx > end_entry {
+                continue;
+            }
+
+            // Extract text from the cell
+            let cell_text = self.extract_text_from_cell(&entry.cell);
+            
+            // Split into lines considering wrapping
+            let wrapped_lines = self.wrap_text(&cell_text, width);
+            
+            for (line_idx, line) in wrapped_lines.iter().enumerate() {
+                let in_range = (entry_idx == start_entry && line_idx >= start_line) ||
+                              (entry_idx > start_entry && entry_idx < end_entry) ||
+                              (entry_idx == end_entry && line_idx <= end_line);
+                
+                if !in_range {
+                    continue;
+                }
+                
+                let line_start = if entry_idx == start_entry && line_idx == start_line {
+                    start_col.min(line.len())
+                } else {
+                    0
+                };
+                
+                let line_end = if entry_idx == end_entry && line_idx == end_line {
+                    end_col.min(line.len())
+                } else {
+                    line.len()
+                };
+                
+                if line_start < line_end {
+                    selected_text.push_str(&line[line_start..line_end]);
+                    if line_idx < wrapped_lines.len() - 1 || entry_idx < end_entry {
+                        selected_text.push('\n');
+                    }
+                }
+            }
+        }
+
+        if selected_text.is_empty() {
+            None
+        } else {
+            Some(selected_text)
+        }
+    }
+
+    /// Extract plain text from a HistoryCell
+    fn extract_text_from_cell(&self, cell: &HistoryCell) -> String {
+        match cell {
+            HistoryCell::WelcomeMessage { view } |
+            HistoryCell::UserPrompt { view } |
+            HistoryCell::AgentMessage { view } |
+            HistoryCell::AgentReasoning { view } |
+            HistoryCell::CompletedExecCommand { view } |
+            HistoryCell::CompletedMcpToolCall { view } => {
+                // Extract text from TextBlock
+                view.lines.iter()
+                    .map(|line| {
+                        line.spans.iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            HistoryCell::ActiveExecCommand { command, .. } => {
+                format!("Running: {}", command)
+            },
+            HistoryCell::ActiveMcpToolCall { invocation, .. } => {
+                invocation.spans.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            },
+            _ => String::new(),
+        }
+    }
+
+    /// Wrap text into lines based on width
+    fn wrap_text(&self, text: &str, width: u16) -> Vec<String> {
+        if width == 0 {
+            return vec![text.to_string()];
+        }
+        
+        let mut wrapped = Vec::new();
+        for line in text.lines() {
+            if line.len() <= width as usize {
+                wrapped.push(line.to_string());
+            } else {
+                // Simple word wrapping
+                let mut current = String::new();
+                for word in line.split_whitespace() {
+                    if current.is_empty() {
+                        current = word.to_string();
+                    } else if current.len() + 1 + word.len() <= width as usize {
+                        current.push(' ');
+                        current.push_str(word);
+                    } else {
+                        wrapped.push(current);
+                        current = word.to_string();
+                    }
+                }
+                if !current.is_empty() {
+                    wrapped.push(current);
+                }
+            }
+        }
+        wrapped
+    }
+
+    /// Start or update text selection
+    fn start_selection(&mut self) {
+        if !self.selection.active {
+            // Start new selection at current position
+            let pos = self.get_cursor_position();
+            self.selection.start = pos;
+            self.selection.end = pos;
+            self.selection.active = true;
+        }
+    }
+
+    /// Get current cursor position based on scroll
+    fn get_cursor_position(&self) -> (usize, usize, usize) {
+        // For simplicity, return position at top of viewport
+        // In a full implementation, we'd track actual cursor position
+        let mut line_count = 0;
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let entry_lines = entry.line_count.get();
+            if line_count + entry_lines > self.scroll_position {
+                let line_in_entry = self.scroll_position.saturating_sub(line_count);
+                return (idx, line_in_entry, 0);
+            }
+            line_count += entry_lines;
+        }
+        (0, 0, 0)
+    }
+
+    /// Update selection end position
+    fn update_selection_end(&mut self, direction: SelectionDirection) {
+        if !self.selection.active {
+            return;
+        }
+
+        let (entry, line, col) = self.selection.end;
+        match direction {
+            SelectionDirection::Up => {
+                if line > 0 {
+                    self.selection.end.1 = line - 1;
+                } else if entry > 0 {
+                    self.selection.end.0 = entry - 1;
+                    self.selection.end.1 = self.entries[entry - 1].line_count.get().saturating_sub(1);
+                }
+            }
+            SelectionDirection::Down => {
+                let current_entry_lines = self.entries.get(entry).map(|e| e.line_count.get()).unwrap_or(0);
+                if line < current_entry_lines.saturating_sub(1) {
+                    self.selection.end.1 = line + 1;
+                } else if entry < self.entries.len().saturating_sub(1) {
+                    self.selection.end.0 = entry + 1;
+                    self.selection.end.1 = 0;
+                }
+            }
+            SelectionDirection::Left => {
+                if col > 0 {
+                    self.selection.end.2 = col - 1;
+                }
+            }
+            SelectionDirection::Right => {
+                self.selection.end.2 = col + 1;
+            }
+        }
+    }
+
+    /// Handle mouse events for selection
+    pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) -> bool {
+        let area = self.last_render_area.get();
+        if area.width == 0 || area.height == 0 {
+            return false;
+        }
+
+        match mouse_event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Start selection
+                if let Some(pos) = self.mouse_to_text_position(mouse_event.column, mouse_event.row, area) {
+                    self.selection.start = pos;
+                    self.selection.end = pos;
+                    self.selection.active = true;
+                    self.mouse_dragging = true;
+                    return true;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                // Update selection end
+                if self.mouse_dragging {
+                    if let Some(pos) = self.mouse_to_text_position(mouse_event.column, mouse_event.row, area) {
+                        self.selection.end = pos;
+                        return true;
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                // End selection
+                self.mouse_dragging = false;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Convert mouse coordinates to text position
+    fn mouse_to_text_position(&self, x: u16, y: u16, area: Rect) -> Option<(usize, usize, usize)> {
+        // Check if coordinates are within the widget area
+        if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
+            return None;
+        }
+
+        let relative_y = (y - area.y) as usize;
+        let relative_x = (x - area.x) as usize;
+        
+        // Account for scroll position
+        let target_line = self.scroll_position + relative_y;
+        
+        // Find which entry and line within entry
+        let mut accumulated_lines = 0;
+        for (entry_idx, entry) in self.entries.iter().enumerate() {
+            let entry_lines = entry.line_count.get();
+            if accumulated_lines + entry_lines > target_line {
+                let line_within_entry = target_line - accumulated_lines;
+                return Some((entry_idx, line_within_entry, relative_x));
+            }
+            accumulated_lines += entry_lines;
+        }
+        
+        None
     }
 
     /// Returns true if it needs a redraw.
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) -> bool {
+        // Handle Ctrl+C for copy
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('c') {
+            if let Some(selected_text) = self.get_selected_text() {
+                // Copy to clipboard
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(selected_text);
+                }
+            }
+            return true;
+        }
+
+        // Handle Ctrl+A for select all
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('a') {
+            if !self.entries.is_empty() {
+                self.selection.active = true;
+                self.selection.start = (0, 0, 0);
+                let last_entry_idx = self.entries.len() - 1;
+                let last_entry_lines = self.entries[last_entry_idx].line_count.get();
+                self.selection.end = (last_entry_idx, last_entry_lines.saturating_sub(1), usize::MAX);
+            }
+            return true;
+        }
+
+        // Handle selection with Shift
+        if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+            match key_event.code {
+                KeyCode::Up => {
+                    self.start_selection();
+                    self.update_selection_end(SelectionDirection::Up);
+                    self.scroll_up(1);
+                    return true;
+                }
+                KeyCode::Down => {
+                    self.start_selection();
+                    self.update_selection_end(SelectionDirection::Down);
+                    self.scroll_down(1);
+                    return true;
+                }
+                KeyCode::Left => {
+                    self.start_selection();
+                    self.update_selection_end(SelectionDirection::Left);
+                    return true;
+                }
+                KeyCode::Right => {
+                    self.start_selection();
+                    self.update_selection_end(SelectionDirection::Right);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        // Clear selection on any non-shift movement
+        if !key_event.modifiers.contains(KeyModifiers::SHIFT) {
+            self.selection.clear();
+        }
+
         match key_event.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.scroll_up(1);
@@ -330,10 +697,97 @@ impl ConversationHistoryWidget {
             }
         }
     }
+
+    /// Get selection info for a specific entry
+    fn get_selection_info_for_entry(&self, entry_idx: usize, skip_lines: usize, visible_lines: usize) -> Option<SelectionInfo> {
+        let (start_entry, start_line, start_col) = self.selection.start;
+        let (end_entry, end_line, end_col) = self.selection.end;
+        
+        // Normalize selection bounds
+        let (start_entry, start_line, start_col, end_entry, end_line, end_col) = 
+            if (start_entry, start_line, start_col) <= (end_entry, end_line, end_col) {
+                (start_entry, start_line, start_col, end_entry, end_line, end_col)
+            } else {
+                (end_entry, end_line, end_col, start_entry, start_line, start_col)
+            };
+        
+        if entry_idx < start_entry || entry_idx > end_entry {
+            return None;
+        }
+        
+        Some(SelectionInfo {
+            start_line: if entry_idx == start_entry { start_line } else { 0 },
+            start_col: if entry_idx == start_entry { start_col } else { 0 },
+            end_line: if entry_idx == end_entry { end_line } else { usize::MAX },
+            end_col: if entry_idx == end_entry { end_col } else { usize::MAX },
+            skip_lines,
+            visible_lines,
+        })
+    }
+
+    /// Render a cell with selection highlighting
+    fn render_cell_with_selection(&self, cell: &HistoryCell, skip_lines: usize, area: Rect, buf: &mut Buffer, selection_info: Option<SelectionInfo>) {
+        // First render the cell normally
+        cell.render_window(skip_lines, area, buf);
+        
+        // Then apply selection highlighting
+        if let Some(info) = selection_info {
+            for y in 0..area.height {
+                let line_idx = skip_lines + y as usize;
+                
+                // Check if this line is within selection
+                if line_idx < info.start_line || line_idx > info.end_line {
+                    continue;
+                }
+                
+                let start_x = if line_idx == info.start_line {
+                    info.start_col.min(area.width as usize)
+                } else {
+                    0
+                };
+                
+                let end_x = if line_idx == info.end_line {
+                    info.end_col.min(area.width as usize)
+                } else {
+                    area.width as usize
+                };
+                
+                // Apply selection style - use inverted colors instead of background
+                for x in start_x..end_x {
+                    let pos = (area.x + x as u16, area.y + y);
+                    if let Some(cell) = buf.cell_mut(pos) {
+                        let current_style = cell.style();
+                        // Invert the colors for selection
+                        let new_fg = current_style.bg.unwrap_or(self.theme.primary.background);
+                        let new_bg = current_style.fg.unwrap_or(self.theme.primary.foreground);
+                        cell.set_style(
+                            Style::default()
+                                .fg(new_fg)
+                                .bg(new_bg)
+                                .add_modifier(current_style.add_modifier)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Selection info for rendering
+struct SelectionInfo {
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    skip_lines: usize,
+    visible_lines: usize,
 }
 
 impl WidgetRef for ConversationHistoryWidget {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+        // Save the render area for mouse coordinate conversion
+        self.last_render_area.set(area);
+        
         // No border for conversation history - use the full area
         let inner = area;
         let viewport_height = inner.height as usize;
@@ -383,6 +837,12 @@ impl WidgetRef for ConversationHistoryWidget {
 
         // Clear entire widget area first.
         Clear.render(area, buf);
+        
+        // Ensure the background uses the theme's background color
+        let background_style = Style::default().bg(self.theme.primary.background);
+        Block::default()
+            .style(background_style)
+            .render(area, buf);
 
         // No border to render - proceed directly to content
 
@@ -418,7 +878,16 @@ impl WidgetRef for ConversationHistoryWidget {
                 height: visible_height as u16,
             };
 
-            entry.cell.render_window(lines_to_skip, cell_rect, buf);
+            // Check if this entry has any selection
+            let entry_idx = self.entries.iter().position(|e| std::ptr::eq(e, entry)).unwrap_or(0);
+            let selection_info = if self.selection.active {
+                self.get_selection_info_for_entry(entry_idx, lines_to_skip, visible_height)
+            } else {
+                None
+            };
+            
+            // Render the cell with selection info
+            self.render_cell_with_selection(&entry.cell, lines_to_skip, cell_rect, buf, selection_info);
 
             // Advance cursor inside viewport.
             y_cursor += visible_height as u16;

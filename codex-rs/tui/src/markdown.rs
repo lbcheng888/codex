@@ -2,6 +2,7 @@ use codex_core::config::Config;
 use codex_core::config_types::UriBasedFileOpener;
 use ratatui::text::Line;
 use ratatui::text::Span;
+use ratatui::style::Color;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -38,11 +39,15 @@ fn append_markdown_with_opener_and_cwd(
         let mut owned_spans = Vec::with_capacity(borrowed_line.spans.len());
         for span in &borrowed_line.spans {
             // Create a new owned String for the span's content to break the lifetime link.
-            let owned_span = Span::styled(span.content.to_string(), span.style);
+            // Force bright white text to override any default markdown styling
+            let mut style = span.style;
+            style.fg = Some(Color::Rgb(245, 245, 245)); // Bright white
+            let owned_span = Span::styled(span.content.to_string(), style);
             owned_spans.push(owned_span);
         }
 
-        let owned_line: Line<'static> = Line::from(owned_spans).style(borrowed_line.style);
+        let mut owned_line: Line<'static> = Line::from(owned_spans).style(borrowed_line.style);
+        owned_line.style.fg = Some(Color::Rgb(245, 245, 245)); // Ensure line is white
         // Preserve alignment if it was set on the source line.
         let owned_line = match borrowed_line.alignment {
             Some(alignment) => owned_line.alignment(alignment),
