@@ -342,6 +342,19 @@ impl ConversationHistoryWidget {
             MouseEventKind::Drag(MouseButton::Left) => {
                 // Update selection end
                 if self.mouse_dragging {
+                    // Check if we need to auto-scroll
+                    if mouse_event.row < area.y {
+                        // Mouse is above the viewport - scroll up
+                        let distance = (area.y - mouse_event.row) as u32;
+                        let scroll_speed = distance.min(5).max(1); // Faster scroll when further from edge
+                        self.scroll_up(scroll_speed);
+                    } else if mouse_event.row >= area.y + area.height {
+                        // Mouse is below the viewport - scroll down
+                        let distance = (mouse_event.row - (area.y + area.height - 1)) as u32;
+                        let scroll_speed = distance.min(5).max(1); // Faster scroll when further from edge
+                        self.scroll_down(scroll_speed);
+                    }
+
                     if let Some(pos) = self.mouse_to_text_position(mouse_event.column, mouse_event.row, area) {
                         self.selection.end = pos;
 
@@ -377,16 +390,25 @@ impl ConversationHistoryWidget {
 
     /// Convert mouse coordinates to text position
     fn mouse_to_text_position(&self, x: u16, y: u16, area: Rect) -> Option<(usize, usize, usize)> {
-        // Check if coordinates are within the widget area
-        if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
-            return None;
-        }
-
-        let relative_y = (y - area.y) as usize;
-        let relative_x = (x - area.x) as usize;
+        // Calculate relative Y position, allowing for coordinates outside the viewport
+        let relative_y = if y < area.y {
+            // Mouse is above the viewport - use negative offset
+            let offset = (area.y - y) as i32;
+            self.scroll_position.saturating_sub(offset as usize)
+        } else {
+            // Mouse is at or below the viewport top
+            self.scroll_position + (y - area.y) as usize
+        };
         
-        // Account for scroll position
-        let target_line = self.scroll_position + relative_y;
+        // Calculate relative X position, clamping to widget width
+        let relative_x = if x < area.x {
+            0
+        } else {
+            (x - area.x).min(area.width.saturating_sub(1)) as usize
+        };
+        
+        // Use relative_y directly as the target line
+        let target_line = relative_y;
         
         // Find which entry and line within entry
         let mut accumulated_lines = 0;

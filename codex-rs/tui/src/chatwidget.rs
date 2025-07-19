@@ -271,7 +271,9 @@ impl ChatWidget<'_> {
     pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
         // Forward mouse events to the conversation history if it has focus
         if matches!(self.input_focus, InputFocus::HistoryPane) {
-            self.conversation_history.handle_mouse_event(mouse_event);
+            if self.conversation_history.handle_mouse_event(mouse_event) {
+                self.request_redraw();
+            }
         }
     }
 

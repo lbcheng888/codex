@@ -35,6 +35,10 @@ npx @modelcontextprotocol/inspector codex mcp
 
 You can enable notifications by configuring a script that is run whenever the agent finishes a turn. The [notify documentation](./config.md#notify) includes a detailed example that explains how to get desktop notifications via [terminal-notifier](https://github.com/julienXX/terminal-notifier) on macOS.
 
+### Automatic TUI/CLI mode
+
+If `codex` is run in a terminal (both stdin and stdout connected to a TTY), it launches the full-screen TUI with rich markdown rendering for prompts, reasoning, and responses. You can disable the TUI with the `--no-tui` flag to use a native terminal experience with ANSI-styled markdown rendering that retains scrollback. Otherwise, it automatically falls back to a non-interactive CLI mode that streams the conversation as ANSI-styled markdown, suitable for pipelines and scripting.
+
 ### `codex exec` to run Codex programmatially/non-interactively
 
 To run Codex non-interactively, run `codex exec PROMPT` (you can also pass the prompt via `stdin`) and Codex will work on your task until it decides that it is done and exits. Output is printed to the terminal directly. You can set the `RUST_LOG` environment variable to see more about what's going on.

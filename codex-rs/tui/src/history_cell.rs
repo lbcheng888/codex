@@ -331,22 +331,53 @@ impl HistoryCell {
     }
 
     pub(crate) fn new_user_prompt(message: String) -> Self {
+        use ratatui::text::{Line as RtLine, Span as RtSpan};
+
         let theme = Theme::default();
-        
-        // Convert message to lines for bubble creation with white text
-        let content_lines: Vec<String> = message.lines()
-            .map(|line| line.to_string())
-            .collect();
-        
-        // Create modern bubble design with white text
-        let mut lines = create_message_bubble(&theme, "user".to_string(), content_lines, true);
-        
-        // Ensure all text is white
-        for line in &mut lines {
-            for span in &mut line.spans {
-                span.style.fg = Some(Color::Rgb(245, 245, 245));
+
+        // --- Parse the message as Markdown so users can leverage rich formatting ---
+        // We intentionally do *not* attempt to rewrite file citations (the `【F:`
+        // syntax) for user-authored prompts because keeping the raw text makes
+        // it easier to copy/paste.  Therefore we can bypass the helper that
+        // requires a `Config` instance and directly feed the string to
+        // `tui_markdown`.
+
+        let mut markdown_lines: Vec<RtLine<'static>> = Vec::new();
+
+        // Render markdown using `tui_markdown` then clone the borrowed spans so
+        // they can live for the full duration of the `HistoryCell`.
+        let rendered = tui_markdown::from_str(&message);
+
+        for borrowed_line in rendered.lines {
+            let mut owned_spans = Vec::with_capacity(borrowed_line.spans.len());
+            for span in &borrowed_line.spans {
+                // Force bright white foreground for maximum readability
+                let mut style = span.style;
+                style.fg = Some(Color::White);
+                owned_spans.push(RtSpan::styled(span.content.to_string(), style));
             }
+
+            let mut owned_line: RtLine<'static> = RtLine::from(owned_spans).style(borrowed_line.style);
+            owned_line.style.fg = Some(Color::White);
+            let owned_line = match borrowed_line.alignment {
+                Some(alignment) => owned_line.alignment(alignment),
+                None => owned_line,
+            };
+
+            markdown_lines.push(owned_line);
         }
+
+        // Build the bubble with a coloured header followed by the rendered
+        // markdown lines.
+        let header_style = theme.message_header_style(true);
+
+        let mut lines: Vec<RtLine<'static>> = Vec::new();
+        // Header line (e.g. "user")
+        lines.push(RtLine::from(vec![RtSpan::styled("user", header_style)]));
+        // Content lines.
+        lines.extend(markdown_lines);
+        // Trailing blank line to add spacing after the bubble.
+        lines.push(RtLine::from(""));
 
         HistoryCell::UserPrompt {
             view: TextBlock::new(lines),

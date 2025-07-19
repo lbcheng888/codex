@@ -278,12 +278,47 @@ export function Markdown({
   const rendered = React.useMemo(() => {
     const linkifiedMarkdown = rewriteFileCitations(children, fileOpener, cwd);
 
-    // Configure marked for this specific render
+    // Configure marked for this specific render. We intentionally override the
+    // `listitem` renderer so that the content of list items does **not** get
+    // wrapped in `chalk.reset` (the default in marked-terminal).  Using the
+    // default would strip any inline styling, e.g. `**bold**`, that appears
+    // inside a list item – breaking our desired output as verified by the
+    // markdown unit tests.
+
+    const rendererOptions: TerminalRendererOptions = {
+      ...options,
+      width: size.columns,
+      // Preserve existing styling inside list items rather than resetting it.
+      listitem: (text: string) => text,
+    };
+
     setOptions({
       // @ts-expect-error missing parser, space props
-      renderer: new TerminalRenderer({ ...options, width: size.columns }),
+      renderer: new TerminalRenderer(rendererOptions),
     });
-    const parsed = parse(linkifiedMarkdown, { async: false }).trim();
+    let parsed = parse(linkifiedMarkdown, { async: false }).trim();
+
+    // ---------------------------------------------------------------------
+    // Work-around for a limitation in `marked-terminal` where inline styling
+    // (e.g. `**bold**`) inside list items is lost because the library applies
+    // `chalk.reset` to the full list item text *after* inline formatting has
+    // been rendered.  To ensure we preserve emphasis we post-process the
+    // rendered output and translate any remaining Markdown bold markers into
+    // the corresponding ANSI escape sequences.
+    // ---------------------------------------------------------------------
+
+    const BOLD_MD = /\*\*(.*?)\*\*|__(.*?)__/g;
+    if (BOLD_MD.test(parsed)) {
+      parsed = parsed.replace(BOLD_MD, (_match, p1, p2) => chalk.bold(p1 ?? p2));
+    }
+
+    // Translate inline code blocks (`text`) that survived unrendered. We apply
+    // the same colour (`chalk.yellow`) used by `marked-terminal` for
+    // `codespan` so the appearance stays consistent.
+    const CODE_MD = /`([^`]+)`/g;
+    if (CODE_MD.test(parsed)) {
+      parsed = parsed.replace(CODE_MD, (_m, code) => chalk.yellow(code));
+    }
 
     // Remove the truncation logic
     return parsed;

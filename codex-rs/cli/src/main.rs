@@ -10,11 +10,14 @@ use codex_cli::login::run_login_with_chatgpt;
 use codex_cli::proto;
 use codex_common::CliConfigOverrides;
 use codex_exec::Cli as ExecCli;
+use codex_exec::Color;
 use codex_file_search::Cli as FileSearchCli;
 use codex_tui::Cli as TuiCli;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::proto::ProtoCli;
+mod native_cli;
 
 /// Codex CLI
 ///
@@ -29,6 +32,10 @@ use crate::proto::ProtoCli;
 struct MultitoolCli {
     #[clap(flatten)]
     pub config_overrides: CliConfigOverrides,
+
+    /// Disable full-screen TUI and use native terminal experience with markdown rendering
+    #[clap(long = "no-tui")]
+    pub no_tui: bool,
 
     #[clap(flatten)]
     interactive: TuiCli,
@@ -108,9 +115,43 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
 
     match cli.subcommand {
         None => {
-            let mut tui_cli = cli.interactive;
-            prepend_config_flags(&mut tui_cli.config_overrides, cli.config_overrides);
-            codex_tui::run_main(tui_cli, codex_linux_sandbox_exe)?;
+            // Default to interactive CLI options
+            let mut interactive = cli.interactive;
+            prepend_config_flags(&mut interactive.config_overrides, cli.config_overrides);
+            // If both stdin and stdout are TTYs and not disabled, choose between
+            // full-screen TUI and native interactive mode depending on `--no-tui`.
+            if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+                if cli.no_tui {
+                    // Native interactive CLI (no alternate screen)
+                    crate::native_cli::run_native_cli(interactive, codex_linux_sandbox_exe).await?;
+                } else {
+                    // Full-screen TUI
+                    codex_tui::run_main(interactive, codex_linux_sandbox_exe)?;
+                }
+            } else {
+                // Non-interactive environment – fall back to one-off exec CLI
+                if interactive.approval_policy.is_some() || interactive.full_auto {
+                    eprintln!(
+                        "Approval policies requiring user interaction are not supported in non-terminal environments."
+                    );
+                    std::process::exit(1);
+                }
+                let exec_cli = ExecCli {
+                    images: interactive.images,
+                    model: interactive.model,
+                    config_profile: interactive.config_profile,
+                    full_auto: false,
+                    dangerously_bypass_approvals_and_sandbox: interactive
+                        .dangerously_bypass_approvals_and_sandbox,
+                    cwd: interactive.cwd,
+                    skip_git_repo_check: interactive.skip_git_repo_check,
+                    config_overrides: interactive.config_overrides,
+                    color: Color::Auto,
+                    last_message_file: None,
+                    prompt: interactive.prompt,
+                };
+                codex_exec::run_main(exec_cli, codex_linux_sandbox_exe).await?;
+            }
         }
         Some(Subcommand::Exec(mut exec_cli)) => {
             prepend_config_flags(&mut exec_cli.config_overrides, cli.config_overrides);
@@ -145,10 +186,10 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             run_apply_command(apply_cli).await?;
         }
         Some(Subcommand::Search(search_cli)) => {
-            use codex_file_search::{run_main, Reporter, FileMatch};
-            use std::io::IsTerminal;
             use codex_common::json_utils;
+            use codex_file_search::{FileMatch, Reporter, run_main};
             use serde_json::json;
+            use std::io::IsTerminal;
 
             // Create a simple reporter for CLI output
             struct CliReporter {
@@ -168,7 +209,11 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                     }
                 }
 
-                fn warn_matches_truncated(&self, total_match_count: usize, shown_match_count: usize) {
+                fn warn_matches_truncated(
+                    &self,
+                    total_match_count: usize,
+                    shown_match_count: usize,
+                ) {
                     if self.json_output {
                         let value = json!({"matches_truncated": true});
                         match json_utils::to_json_string(&value) {

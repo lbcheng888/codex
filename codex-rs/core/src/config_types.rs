@@ -121,17 +121,16 @@ pub struct Tui {
 // more *Claude-style* experience.
 impl Default for Tui {
     fn default() -> Self {
-        // Use the platform's native scroll-back buffer and allow the user to
-        // select/copy text with the mouse by default.  These two behaviours
-        // require that we (a) avoid switching to the *alternate* screen and
-        // (b) keep mouse capture disabled so the terminal emulator continues
-        // to handle click-and-drag selection itself.
+        // Use the platform's native scroll-back buffer and enable mouse capture
+        // for scroll wheel events. We'll implement selective event handling to
+        // preserve text selection functionality while supporting scrolling.
+        // This requires (a) avoiding the *alternate* screen and (b) filtering
+        // mouse events to pass click/drag events to the terminal.
 
         Self {
-            // Disabling mouse capture ensures that "click-and-drag" text
-            // selection works out-of-the-box without the user needing to hold
-            // down a modifier key (e.g. `Shift` in many terminals).
-            disable_mouse_capture: true,
+            // Enable mouse capture to support scroll wheel events while
+            // preserving text selection through selective event handling.
+            disable_mouse_capture: false,
 
             // Render directly to the main screen so that the normal
             // scroll-back buffer remains available.

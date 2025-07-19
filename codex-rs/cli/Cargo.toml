@@ -37,3 +37,14 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+
+# Native interactive CLI
+reedline = { version = "0.27", default-features = false, features = ["bashisms"] }
+# Needed for custom keybindings (KeyCode, KeyModifiers)
+dirs = "4"
+pulldown-cmark = "0.9"
+termion = "2"
+
+# For markdown rendering in native interactive mode
+ratatui = { version = "0.29.0", default-features = false }
+tui-markdown = "0.3.3"

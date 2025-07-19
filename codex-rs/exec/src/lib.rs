@@ -10,6 +10,7 @@ use std::sync::Arc;
 use codex_common::io_utils;
 
 pub use cli::Cli;
+pub use cli::Color;
 use codex_core::codex_wrapper;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;

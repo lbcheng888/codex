@@ -14,7 +14,6 @@ pub struct Cli {
     #[arg(long, short = 'm')]
     pub model: Option<String>,
 
-
     /// Configuration profile from config.toml to specify default options.
     #[arg(long = "profile", short = 'p')]
     pub config_profile: Option<String>,

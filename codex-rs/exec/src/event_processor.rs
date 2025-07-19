@@ -22,6 +22,147 @@ use shlex::try_join;
 use std::collections::HashMap;
 use std::time::Instant;
 
+/// Render a simple subset of Markdown to ANSI-styled text for CLI output.
+/// Supports headings (#, ##, ###), inline code (`code`), and fenced code blocks (```).
+fn render_markdown_to_ansi(
+    input: &str,
+    bold: Style,
+    italic: Style,
+    dimmed: Style,
+    code_style: Style,
+) -> String {
+    let mut out_lines = Vec::new();
+    let mut in_code_block = false;
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+
+        // Handle fenced code blocks (```)
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            // Skip the fence markers themselves so they are not printed.
+            continue;
+        }
+
+        if in_code_block {
+            // Keep code block lines indented and apply the dedicated style.
+            out_lines.push(format!("  {}", line).style(code_style).to_string());
+            continue;
+        }
+
+        // For non-code lines we perform a *very* small subset of markdown
+        // rendering that is sufficient for our CLI output:
+        //   * Headings (#, ##, ### …)  -> bold
+        //   * Inline code              -> code_style
+        //   * Bold (**text** or __text__)  -> bold
+        //   * Italic (*text* or _text_)    -> italic
+        //   * Blockquote (> line)      -> dimmed
+
+        // Strip heading markers first so other inline formatting applies to
+        // the heading content as well.
+        let (mut content, heading_style) = if trimmed.starts_with('#') {
+            (
+                trimmed.trim_start_matches('#').trim_start().to_string(),
+                Some(bold),
+            )
+        } else {
+            (line.to_string(), None)
+        };
+
+        // If the line is a blockquote, drop the leading '>' and one optional
+        // space so we can style the remainder with `dimmed` to visually
+        // distinguish it.
+        let mut apply_dimmed = false;
+        let blockquote_trimmed = content.trim_start();
+        if blockquote_trimmed.starts_with('>') {
+            apply_dimmed = true;
+            content = blockquote_trimmed[1..].trim_start().to_string();
+        }
+
+        // Helper to push a styled span into an output buffer.
+        let mut rendered_line = String::new();
+        let mut idx = 0;
+        let bytes = content.as_bytes();
+        while idx < bytes.len() {
+            // Inline code span
+            if bytes[idx] == b'`' {
+                if let Some(end) = content[idx + 1..].find('`') {
+                    let code_text = &content[idx + 1..idx + 1 + end];
+                    rendered_line.push_str(&code_text.style(code_style).to_string());
+                    idx += end + 2;
+                    continue;
+                }
+            }
+
+            // Bold (** or __)
+            if idx + 1 < bytes.len() && (bytes[idx] == b'*' && bytes[idx + 1] == b'*') {
+                if let Some(end) = content[idx + 2..].find("**") {
+                    let bold_text = &content[idx + 2..idx + 2 + end];
+                    rendered_line.push_str(&bold_text.style(bold).to_string());
+                    idx += end + 4;
+                    continue;
+                }
+            }
+            if idx + 1 < bytes.len() && (bytes[idx] == b'_' && bytes[idx + 1] == b'_') {
+                if let Some(end) = content[idx + 2..].find("__") {
+                    let bold_text = &content[idx + 2..idx + 2 + end];
+                    rendered_line.push_str(&bold_text.style(bold).to_string());
+                    idx += end + 4;
+                    continue;
+                }
+            }
+
+            // Italic (* or _)
+            if bytes[idx] == b'*' || bytes[idx] == b'_' {
+                let marker = bytes[idx];
+                if let Some(end_pos) = content[idx + 1..].find(marker as char) {
+                    let italic_text = &content[idx + 1..idx + 1 + end_pos];
+                    rendered_line.push_str(&italic_text.style(italic).to_string());
+                    idx += end_pos + 2;
+                    continue;
+                }
+            }
+
+            // Otherwise, push current byte and advance.
+            rendered_line.push(bytes[idx] as char);
+            idx += 1;
+        }
+
+        // Apply heading *or* blockquote style if present. We prefer heading
+        // style (bold) so blockquote > # Heading stays bold.
+        if let Some(style) = heading_style {
+            rendered_line = rendered_line.style(style).to_string();
+        } else if apply_dimmed {
+            rendered_line = rendered_line.style(dimmed).to_string();
+        }
+
+        out_lines.push(rendered_line);
+    }
+    out_lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_markdown_to_ansi;
+    use owo_colors::Style;
+
+    #[test]
+    fn test_render_markdown_to_ansi_basic() {
+        let bold = Style::new();
+        let italic = Style::new();
+        let dimmed = Style::new();
+        let code_style = Style::new();
+        let input = "# Heading\nSome `code` example.\n\n```rust\nfn main() {}\n```\n";
+        let output = render_markdown_to_ansi(input, bold, italic, dimmed, code_style);
+        // Markdown markers should be removed
+        assert!(!output.contains('#'));
+        assert!(!output.contains("```"));
+        // Content should be preserved
+        assert!(output.contains("Heading"));
+        assert!(output.contains("code example."));
+        assert!(output.contains("fn main() {}"));
+    }
+}
+
 /// This should be configurable. When used in CI, users may not want to impose
 /// a limit so they can see the full transcript.
 const MAX_OUTPUT_LINES_FOR_EXEC_TOOL_CALL: usize = 20;
@@ -159,11 +300,14 @@ impl EventProcessor {
         // Echo the prompt that will be sent to the agent so it is visible in the
         // transcript/logs before any events come in. Note the prompt may have been
         // read from stdin, so it may not be visible in the terminal otherwise.
+        // Render user prompt as Markdown with basic styling
+        let rendered_prompt =
+            render_markdown_to_ansi(prompt, self.bold, self.italic, self.dimmed, self.cyan);
         ts_println!(
             self,
             "{}\n{}",
             "User instructions:".style(self.bold).style(self.cyan),
-            prompt
+            rendered_prompt
         );
     }
 
@@ -184,10 +328,19 @@ impl EventProcessor {
                 ts_println!(self, "tokens used: {total_tokens}");
             }
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+                // Render model response as Markdown with basic styling
+                let rendered = render_markdown_to_ansi(
+                    &message,
+                    self.bold,
+                    self.italic,
+                    self.dimmed,
+                    self.cyan,
+                );
                 ts_println!(
                     self,
-                    "{}\n{message}",
-                    "codex".style(self.bold).style(self.magenta)
+                    "{}\n{}",
+                    "codex".style(self.bold).style(self.magenta),
+                    rendered
                 );
             }
             EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
