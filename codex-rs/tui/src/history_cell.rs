@@ -17,6 +17,7 @@ use image::GenericImageView;
 use image::ImageReader;
 use lazy_static::lazy_static;
 use mcp_types::EmbeddedResourceResource;
+use mcp_types::ResourceLink;
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
@@ -556,8 +557,7 @@ impl HistoryCell {
     ) -> Option<Self> {
         match result {
             Ok(mcp_types::CallToolResult { content, .. }) => {
-                if let Some(mcp_types::CallToolResultContent::ImageContent(image)) = content.first()
-                {
+                if let Some(mcp_types::ContentBlock::ImageContent(image)) = content.first() {
                     let raw_data =
                         match base64::engine::general_purpose::STANDARD.decode(&image.data) {
                             Ok(data) => data,
@@ -631,21 +631,21 @@ impl HistoryCell {
 
                     for tool_call_result in content {
                         let line_text = match tool_call_result {
-                            mcp_types::CallToolResultContent::TextContent(text) => {
+                            mcp_types::ContentBlock::TextContent(text) => {
                                 format_and_truncate_tool_result(
                                     &text.text,
                                     TOOL_CALL_MAX_LINES,
                                     num_cols as usize,
                                 )
                             }
-                            mcp_types::CallToolResultContent::ImageContent(_) => {
+                            mcp_types::ContentBlock::ImageContent(_) => {
                                 // TODO show images even if they're not the first result, will require a refactor of `CompletedMcpToolCall`
                                 "<image content>".to_string()
                             }
-                            mcp_types::CallToolResultContent::AudioContent(_) => {
+                            mcp_types::ContentBlock::AudioContent(_) => {
                                 "<audio content>".to_string()
                             }
-                            mcp_types::CallToolResultContent::EmbeddedResource(resource) => {
+                            mcp_types::ContentBlock::EmbeddedResource(resource) => {
                                 let uri = match resource.resource {
                                     EmbeddedResourceResource::TextResourceContents(text) => {
                                         text.uri
@@ -655,6 +655,9 @@ impl HistoryCell {
                                     }
                                 };
                                 format!("embedded resource: {uri}")
+                            }
+                            mcp_types::ContentBlock::ResourceLink(ResourceLink { uri, .. }) => {
+                                format!("link: {uri}")
                             }
                         };
                         lines.push(Line::styled(line_text, theme.dim_style()));
@@ -679,11 +682,53 @@ impl HistoryCell {
         }
     }
 
+    /// Create a background event entry. The `message` supports basic markdown
+    /// styling so that links and inline formatting render consistently with
+    /// normal user/assistant messages. We intentionally keep the rendering
+    /// logic **self-contained** to avoid requiring a `Config` instance (which
+    /// is not available at the call-sites generating background events).
     pub(crate) fn new_background_event(message: String) -> Self {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::styled("event", Style::default().fg(Color::Rgb(245, 245, 245))));
-        lines.extend(message.lines().map(|line| ansi_escape_line(line).style(Style::default().fg(Color::Rgb(245, 245, 245)))));
-        lines.push(Line::from(""));
+        use ratatui::text::{Line as RtLine, Span as RtSpan};
+
+        let mut lines: Vec<RtLine<'static>> = Vec::new();
+
+        // First line – small "event" header so users can visually distinguish
+        // background information from regular assistant responses.
+        lines.push(RtLine::styled("event", Style::default().fg(Color::Rgb(245, 245, 245))));
+
+        // Render the *content* using the same markdown renderer employed for
+        // user & assistant messages.  We bypass citation-rewriting because the
+        // helper requires the full `Config`; background events rarely contain
+        // the specialised citation syntax and, even when they do, displaying
+        // the raw text is acceptable.
+        let rendered = tui_markdown::from_str(&message);
+
+        for borrowed_line in rendered.lines {
+            let owned_spans: Vec<RtSpan<'static>> = borrowed_line
+                .spans
+                .iter()
+                .map(|span| {
+                    // Clone content and force bright-white foreground for
+                    // maximum readability inside the dark TUI theme.
+                    let mut style = span.style;
+                    style.fg = Some(Color::White);
+                    RtSpan::styled(span.content.to_string(), style)
+                })
+                .collect();
+
+            let mut owned_line: RtLine<'static> = RtLine::from(owned_spans).style(borrowed_line.style);
+            owned_line.style.fg = Some(Color::White);
+            let owned_line = match borrowed_line.alignment {
+                Some(alignment) => owned_line.alignment(alignment),
+                None => owned_line,
+            };
+
+            lines.push(owned_line);
+        }
+
+        // Blank spacer after the message bubble.
+        lines.push(RtLine::from(""));
+
         HistoryCell::BackgroundEvent {
             view: TextBlock::new(lines),
         }

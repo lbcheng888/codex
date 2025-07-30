@@ -99,7 +99,9 @@ pub fn create_parallel_read_tool() -> Tool {
 
     Tool {
         name: "parallel_read".to_string(),
+        title: Some("Parallel File Reader".to_string()),
         input_schema: tool_input_schema,
+        output_schema: None,
         description: Some(
             "Read multiple files in parallel. Accepts an array of file paths and returns \
              the content of each file with error handling for individual failures."

@@ -46,9 +46,7 @@ use crate::exec::ExecParams;
 use crate::exec::ExecToolCallOutput;
 use crate::exec::process_exec_tool_call;
 use crate::exec_env::create_env;
-use crate::flags::OPENAI_STREAM_MAX_RETRIES;
 use crate::mcp_connection_manager::McpConnectionManager;
-use crate::mcp_connection_manager::try_parse_fully_qualified_tool_name;
 use crate::mcp_tool_call::handle_mcp_tool_call;
 use crate::models::ContentItem;
 use crate::models::FunctionCallOutputPayload;
@@ -58,7 +56,9 @@ use crate::models::ResponseInputItem;
 use crate::models::ResponseItem;
 use crate::models::ShellToolCallParams;
 use crate::project_doc::get_user_instructions;
+use crate::protocol::AgentMessageDeltaEvent;
 use crate::protocol::AgentMessageEvent;
+use crate::protocol::AgentReasoningDeltaEvent;
 use crate::protocol::AgentReasoningEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
 use crate::protocol::AskForApproval;
@@ -97,8 +97,11 @@ impl Codex {
     /// of `Codex` and the ID of the `SessionInitialized` event that was
     /// submitted to start the session.
     pub async fn spawn(config: Config, ctrl_c: Arc<Notify>) -> CodexResult<(Codex, String)> {
+        // experimental resume path (undocumented)
+        let resume_path = config.experimental_resume.clone();
+        info!("resume_path: {resume_path:?}");
         let (tx_sub, rx_sub) = async_channel::bounded(64);
-        let (tx_event, rx_event) = async_channel::bounded(64);
+        let (tx_event, rx_event) = async_channel::bounded(1600);
 
         let instructions = get_user_instructions(&config).await;
         let configure_session = Op::ConfigureSession {
@@ -111,6 +114,7 @@ impl Codex {
             disable_response_storage: config.disable_response_storage,
             notify: config.notify.clone(),
             cwd: config.cwd.clone(),
+            resume_path: resume_path.clone(),
         };
 
         let config = Arc::new(config);
@@ -269,24 +273,30 @@ impl Session {
     /// transcript, if enabled.
     async fn record_conversation_items(&self, items: &[ResponseItem]) {
         debug!("Recording items for conversation: {items:?}");
-        self.record_rollout_items(items).await;
+        self.record_state_snapshot(items).await;
 
         if let Some(transcript) = self.state.lock().expect("Session state mutex was poisoned").zdr_transcript.as_mut() {
             transcript.record_items(items);
         }
     }
 
-    /// Append the given items to the session's rollout transcript (if enabled)
-    /// and persist them to disk.
-    async fn record_rollout_items(&self, items: &[ResponseItem]) {
-        // Clone the recorder outside of the mutex so we don't hold the lock
-        // across an await point (MutexGuard is not Send).
+    async fn record_state_snapshot(&self, items: &[ResponseItem]) {
+        let snapshot = {
+            let state = self.state.lock().unwrap();
+            crate::rollout::SessionStateSnapshot {
+                previous_response_id: state.previous_response_id.clone(),
+            }
+        };
+
         let recorder = {
             let guard = self.rollout.lock().expect("Rollout mutex was poisoned");
             guard.as_ref().cloned()
         };
 
         if let Some(rec) = recorder {
+            if let Err(e) = rec.record_state(snapshot).await {
+                error!("failed to record rollout state: {e:#}");
+            }
             if let Err(e) = rec.record_items(items).await {
                 error!("failed to record rollout items: {e:#}");
             }
@@ -484,7 +494,7 @@ async fn submission_loop(
     crate::debug_log!("[SUBMISSION_LOOP] Config provider: {}", config.model_provider_id);
     
     // Generate a unique ID for the lifetime of this Codex session.
-    let session_id = Uuid::new_v4();
+    let mut session_id = Uuid::new_v4();
 
     let mut sess: Option<Arc<Session>> = None;
     // shorthand - send an event when there is no active session
@@ -570,8 +580,11 @@ async fn submission_loop(
                 disable_response_storage,
                 notify,
                 cwd,
+                resume_path,
             } => {
-                info!("Configuring session: model={model}; provider={provider:?}");
+                info!(
+                    "Configuring session: model={model}; provider={provider:?}; resume={resume_path:?}"
+                );
                 if !cwd.is_absolute() {
                     let message = format!("cwd is not absolute: {cwd:?}");
                     error!(message);
@@ -584,12 +597,48 @@ async fn submission_loop(
                     }
                     return;
                 }
+                // Optionally resume an existing rollout.
+                let mut restored_items: Option<Vec<ResponseItem>> = None;
+                let mut restored_prev_id: Option<String> = None;
+                let rollout_recorder: Option<RolloutRecorder> =
+                    if let Some(path) = resume_path.as_ref() {
+                        match RolloutRecorder::resume(path).await {
+                            Ok((rec, saved)) => {
+                                session_id = saved.session_id;
+                                restored_prev_id = saved.state.previous_response_id;
+                                if !saved.items.is_empty() {
+                                    restored_items = Some(saved.items);
+                                }
+                                Some(rec)
+                            }
+                            Err(e) => {
+                                warn!("failed to resume rollout from {path:?}: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                let rollout_recorder = match rollout_recorder {
+                    Some(rec) => Some(rec),
+                    None => match RolloutRecorder::new(&config, session_id, instructions.clone())
+                        .await
+                    {
+                        Ok(r) => Some(r),
+                        Err(e) => {
+                            warn!("failed to initialise rollout recorder: {e}");
+                            None
+                        }
+                    },
+                };
 
                 let client = ModelClient::new(
                     config.clone(),
                     provider.clone(),
                     model_reasoning_effort,
                     model_reasoning_summary,
+                    session_id,
                 );
 
                 // abort any current running session and clone its state
@@ -643,21 +692,6 @@ async fn submission_loop(
                         });
                     }
                 }
-
-                // Attempt to create a RolloutRecorder *before* moving the
-                // `instructions` value into the Session struct.
-                // TODO: if ConfigureSession is sent twice, we will create an
-                // overlapping rollout file. Consider passing RolloutRecorder
-                // from above.
-                let rollout_recorder =
-                    match RolloutRecorder::new(&config, session_id, instructions.clone()).await {
-                        Ok(r) => Some(r),
-                        Err(e) => {
-                            warn!("failed to initialise rollout recorder: {e}");
-                            None
-                        }
-                    };
-
                 sess = Some(Arc::new(Session {
                     client,
                     tx_event: tx_event.clone(),
@@ -672,6 +706,19 @@ async fn submission_loop(
                     state: Mutex::new(state),
                     rollout: Mutex::new(rollout_recorder),
                 }));
+
+                // Patch restored state into the newly created session.
+                if let Some(sess_arc) = &sess {
+                    if restored_prev_id.is_some() || restored_items.is_some() {
+                        let mut st = sess_arc.state.lock().unwrap();
+                        st.previous_response_id = restored_prev_id;
+                        if let (Some(hist), Some(items)) =
+                            (st.zdr_transcript.as_mut(), restored_items.as_ref())
+                        {
+                            hist.record_items(items.iter());
+                        }
+                    }
+                }
 
                 // Gather history metadata for SessionConfiguredEvent.
                 let (history_log_id, history_entry_count) =
@@ -744,6 +791,8 @@ async fn submission_loop(
                 }
             }
             Op::AddToHistory { text } => {
+                // TODO: What should we do if we got AddToHistory before ConfigureSession?
+                // currently, if ConfigureSession has resume path, this history will be ignored
                 let id = session_id;
                 let config = config.clone();
                 tokio::spawn(async move {
@@ -941,15 +990,17 @@ async fn run_task(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
                         ) => {
                             items_to_record_in_conversation_history.push(item);
                             let (content, success): (String, Option<bool>) = match result {
-                                Ok(CallToolResult { content, is_error }) => {
-                                    match serde_json::to_string(content) {
-                                        Ok(content) => (content, *is_error),
-                                        Err(e) => {
-                                            warn!("Failed to serialize MCP tool call output: {e}");
-                                            (e.to_string(), Some(true))
-                                        }
+                                Ok(CallToolResult {
+                                    content,
+                                    is_error,
+                                    structured_content: _,
+                                }) => match serde_json::to_string(content) {
+                                    Ok(content) => (content, *is_error),
+                                    Err(e) => {
+                                        warn!("Failed to serialize MCP tool call output: {e}");
+                                        (e.to_string(), Some(true))
                                     }
-                                }
+                                },
                                 Err(e) => (e.clone(), Some(true)),
                             };
                             items_to_record_in_conversation_history.push(
@@ -1048,12 +1099,13 @@ async fn run_turn(
             Err(CodexErr::Interrupted) => return Err(CodexErr::Interrupted),
             Err(CodexErr::EnvVar(var)) => return Err(CodexErr::EnvVar(var)),
             Err(e) => {
-                if retries < *OPENAI_STREAM_MAX_RETRIES {
+                // Use the configured provider-specific stream retry budget.
+                let max_retries = sess.client.get_provider().stream_max_retries();
+                if retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
                     warn!(
-                        "stream disconnected - retrying turn ({retries}/{} in {delay:?})...",
-                        *OPENAI_STREAM_MAX_RETRIES
+                        "stream disconnected - retrying turn ({retries}/{max_retries} in {delay:?})...",
                     );
 
                     // Surface retry information to any UI/front‑end so the
@@ -1062,8 +1114,7 @@ async fn run_turn(
                     sess.notify_background_event(
                         &sub_id,
                         format!(
-                            "stream error: {e}; retrying {retries}/{} in {:?}…",
-                            *OPENAI_STREAM_MAX_RETRIES, delay
+                            "stream error: {e}; retrying {retries}/{max_retries} in {delay:?}…"
                         ),
                     )
                     .await;
@@ -1151,43 +1202,29 @@ async fn try_run_turn(
     let mut stream = sess.client.clone().stream(&prompt).await?;
     crate::debug_log!("[TRY_RUN_TURN] Stream created successfully");
 
-    // Buffer all the incoming messages from the stream first, then execute them.
-    // If we execute a function call in the middle of handling the stream, it can time out.
-    let mut input = Vec::new();
-    while let Some(event) = stream.next().await {
-        let event = event?;
-        if std::env::var("CODEX_DEBUG").is_ok() {
-            match &event {
-                ResponseEvent::OutputItemDone(item) => {
-                    match item {
-                        ResponseItem::FunctionCall { name, call_id, .. } => {
-                            eprintln!("[DEBUG CORE] Stream received FunctionCall: '{}' (call_id: {})", name, call_id);
-                        }
-                        ResponseItem::Message { .. } => {
-                            eprintln!("[DEBUG CORE] Stream received Message");
-                        }
-                        _ => {
-                            eprintln!("[DEBUG CORE] Stream received: {:?}", std::mem::discriminant(item));
-                        }
-                    }
-                }
-                ResponseEvent::Created => {
-                    eprintln!("[DEBUG CORE] Stream event: Created");
-                }
-                ResponseEvent::Completed { .. } => {
-                    eprintln!("[DEBUG CORE] Stream event: Completed");
-                }
-            }
-        }
-        input.push(event);
-    }
-    
-    if std::env::var("CODEX_DEBUG").is_ok() {
-        eprintln!("[DEBUG CORE] Stream ended with {} events", input.len());
-    }
-
     let mut output = Vec::new();
-    for event in input {
+    loop {
+        // Poll the next item from the model stream. We must inspect *both* Ok and Err
+        // cases so that transient stream failures (e.g., dropped SSE connection before
+        // `response.completed`) bubble up and trigger the caller's retry logic.
+        let event = stream.next().await;
+        let Some(event) = event else {
+            // Channel closed without yielding a final Completed event or explicit error.
+            // Treat as a disconnected stream so the caller can retry.
+            return Err(CodexErr::Stream(
+                "stream closed before response.completed".into(),
+            ));
+        };
+
+        let event = match event {
+            Ok(ev) => ev,
+            Err(e) => {
+                // Propagate the underlying stream error to the caller (run_turn), which
+                // will apply the configured `stream_max_retries` policy.
+                return Err(e);
+            }
+        };
+
         match event {
             ResponseEvent::Created => {
                 let mut state = sess.state.lock().unwrap();
@@ -1228,11 +1265,24 @@ async fn try_run_turn(
 
                 let mut state = sess.state.lock().unwrap();
                 state.previous_response_id = Some(response_id);
-                break;
+                return Ok(output);
+            }
+            ResponseEvent::OutputTextDelta(delta) => {
+                let event = Event {
+                    id: sub_id.to_string(),
+                    msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }),
+                };
+                sess.tx_event.send(event).await.ok();
+            }
+            ResponseEvent::ReasoningSummaryDelta(delta) => {
+                let event = Event {
+                    id: sub_id.to_string(),
+                    msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }),
+                };
+                sess.tx_event.send(event).await.ok();
             }
         }
     }
-    Ok(output)
 }
 
 async fn handle_response_item(
@@ -1363,16 +1413,13 @@ async fn handle_function_call(
             let params = match parse_container_exec_arguments(arguments, sess, &call_id) {
                 Ok(params) => params,
                 Err(output) => {
-                    if std::env::var("CODEX_DEBUG").is_ok() {
-                        eprintln!("[DEBUG CORE] Shell argument parsing failed");
-                    }
-                    return output;
+                    return *output;
                 }
             };
             handle_container_exec_with_params(params, sess, sub_id, call_id).await
         }
         _ => {
-            match try_parse_fully_qualified_tool_name(&name) {
+            match sess.mcp_connection_manager.parse_tool_name(&name) {
                 Some((server, tool_name)) => {
                     if std::env::var("CODEX_DEBUG").is_ok() {
                         eprintln!("[DEBUG CORE] Routing to MCP tool - server: '{}', tool: '{}'", server, tool_name);
@@ -1400,7 +1447,7 @@ async fn handle_function_call(
                                 if std::env::var("CODEX_DEBUG").is_ok() {
                                     eprintln!("[DEBUG CORE] Shell fallback argument parsing failed");
                                 }
-                                return output;
+                                return *output;
                             }
                         };
                         return handle_container_exec_with_params(params, sess, sub_id, call_id).await;
@@ -1436,24 +1483,13 @@ fn parse_container_exec_arguments(
     arguments: String,
     sess: &Session,
     call_id: &str,
-) -> Result<ExecParams, ResponseInputItem> {
-    if std::env::var("CODEX_DEBUG").is_ok() {
-        eprintln!("[DEBUG CORE] Parsing shell arguments: {}", arguments);
-    }
-    
-    // Try standard format first
-    match serde_json::from_str::<ShellToolCallParams>(&arguments) {
-        Ok(shell_tool_call_params) => {
-            if std::env::var("CODEX_DEBUG").is_ok() {
-                eprintln!("[DEBUG CORE] Successfully parsed standard shell tool call params");
-            }
-            return Ok(to_exec_params(shell_tool_call_params, sess));
+) -> Result<ExecParams, Box<ResponseInputItem>> {
+    // parse command
+    if let Ok(shell_tool_call_params) = serde_json::from_str::<ShellToolCallParams>(&arguments) {
+        if std::env::var("CODEX_DEBUG").is_ok() {
+            eprintln!("[DEBUG CORE] Successfully parsed standard shell tool call params");
         }
-        Err(e) => {
-            if std::env::var("CODEX_DEBUG").is_ok() {
-                eprintln!("[DEBUG CORE] Standard parsing failed: {}, trying fallback formats", e);
-            }
-        }
+        return Ok(to_exec_params(shell_tool_call_params, sess));
     }
     
     // Try to parse as a raw JSON object and extract command in various formats
@@ -1475,19 +1511,19 @@ fn parse_container_exec_arguments(
                     if std::env::var("CODEX_DEBUG").is_ok() {
                         eprintln!("[DEBUG CORE] Command is a string, splitting: '{}'", s);
                     }
-                    shell_words::split(s).unwrap_or_else(|_| vec![s.clone()])
+                    shlex::split(s).unwrap_or_else(|| vec![s.clone()])
                 }
                 _ => {
                     if std::env::var("CODEX_DEBUG").is_ok() {
                         eprintln!("[DEBUG CORE] Command field has unexpected type");
                     }
-                    return Err(ResponseInputItem::FunctionCallOutput {
+                    return Err(Box::new(ResponseInputItem::FunctionCallOutput {
                         call_id: call_id.to_string(),
                         output: FunctionCallOutputPayload {
                             content: format!("command field must be string or array, got: {:?}", command_value),
                             success: Some(false),
                         },
-                    });
+                    }));
                 }
             };
             
@@ -1517,7 +1553,7 @@ fn parse_container_exec_arguments(
             success: Some(false),
         },
     };
-    Err(output)
+    Err(Box::new(output))
 }
 
 async fn handle_container_exec_with_params(

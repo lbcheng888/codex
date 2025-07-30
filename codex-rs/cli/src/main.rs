@@ -147,6 +147,7 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                     skip_git_repo_check: interactive.skip_git_repo_check,
                     config_overrides: interactive.config_overrides,
                     color: Color::Auto,
+                    json: false,
                     last_message_file: None,
                     prompt: interactive.prompt,
                 };

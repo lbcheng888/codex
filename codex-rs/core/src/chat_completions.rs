@@ -21,8 +21,6 @@ use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::error::CodexErr;
 use crate::error::Result;
-use crate::flags::OPENAI_REQUEST_MAX_RETRIES;
-use crate::flags::OPENAI_STREAM_IDLE_TIMEOUT_MS;
 use crate::models::ContentItem;
 use crate::models::ResponseItem;
 use crate::openai_tools::create_tools_json_for_chat_completions_api;
@@ -125,6 +123,7 @@ pub(crate) async fn stream_chat_completions(
     crate::debug_log!("[CHAT] Full request payload: {}", serde_json::to_string_pretty(&payload).unwrap_or_default());
 
     let mut attempt = 0;
+    let max_retries = provider.request_max_retries();
     loop {
         attempt += 1;
 
@@ -138,10 +137,13 @@ pub(crate) async fn stream_chat_completions(
 
         match res {
             Ok(resp) if resp.status().is_success() => {
-                crate::debug_log!("[CHAT] HTTP Response successful: {}", resp.status());
-                let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(16);
+                let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
                 let stream = resp.bytes_stream().map_err(CodexErr::Reqwest);
-                tokio::spawn(process_chat_sse(stream, tx_event));
+                tokio::spawn(process_chat_sse(
+                    stream,
+                    tx_event,
+                    provider.stream_idle_timeout(),
+                ));
                 return Ok(ResponseStream { rx_event });
             }
             Ok(res) => {
@@ -153,12 +155,7 @@ pub(crate) async fn stream_chat_completions(
                     return Err(CodexErr::UnexpectedStatus(status, body));
                 }
 
-                if attempt > *OPENAI_REQUEST_MAX_RETRIES {
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        crate::debug_log!(
-                            "[CHAT] Rate limit retry exhausted. Grok-4 has limits: 32K TPM, 120 RPM. Consider spacing requests further apart."
-                        );
-                    }
+                if attempt > max_retries {
                     return Err(CodexErr::RetryLimit(status));
                 }
 
@@ -185,12 +182,11 @@ pub(crate) async fn stream_chat_completions(
                         .unwrap_or_else(|| backoff(attempt))
                 };
                 
-                crate::debug_log!("[CHAT] Retrying in {:?} (attempt {}/{})", delay, attempt, *OPENAI_REQUEST_MAX_RETRIES);
+                crate::debug_log!("[CHAT] Retrying in {:?} (attempt {}/{})", delay, attempt, max_retries);
                 tokio::time::sleep(delay).await;
             }
             Err(e) => {
-                crate::debug_log!("[CHAT] HTTP Request failed: {}", e);
-                if attempt > *OPENAI_REQUEST_MAX_RETRIES {
+                if attempt > max_retries {
                     return Err(e.into());
                 }
                 let delay = backoff(attempt);
@@ -203,13 +199,14 @@ pub(crate) async fn stream_chat_completions(
 /// Lightweight SSE processor for the Chat Completions streaming format. The
 /// output is mapped onto Codex's internal [`ResponseEvent`] so that the rest
 /// of the pipeline can stay agnostic of the underlying wire format.
-async fn process_chat_sse<S>(stream: S, tx_event: mpsc::Sender<Result<ResponseEvent>>)
-where
+async fn process_chat_sse<S>(
+    stream: S,
+    tx_event: mpsc::Sender<Result<ResponseEvent>>,
+    idle_timeout: Duration,
+) where
     S: Stream<Item = Result<Bytes>> + Unpin,
 {
     let mut stream = stream.eventsource();
-
-    let idle_timeout = *OPENAI_STREAM_IDLE_TIMEOUT_MS;
 
     // State to accumulate a function call across streaming chunks.
     // OpenAI may split the `arguments` string over multiple `delta` events
@@ -541,6 +538,12 @@ where
                 Poll::Ready(Some(Ok(ResponseEvent::Created))) => {
                     // These events are exclusive to the Responses API and
                     // will never appear in a Chat Completions stream.
+                    continue;
+                }
+                Poll::Ready(Some(Ok(ResponseEvent::OutputTextDelta(_))))
+                | Poll::Ready(Some(Ok(ResponseEvent::ReasoningSummaryDelta(_)))) => {
+                    // Deltas are ignored here since aggregation waits for the
+                    // final OutputItemDone.
                     continue;
                 }
             }

@@ -1,20 +1,21 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::codex_tool_config::CodexToolCallParam;
 use crate::codex_tool_config::create_tool_for_codex_tool_call_param;
 use crate::parallel_read_tool::{create_parallel_read_tool, execute_parallel_read, ParallelReadParams};
+use crate::outgoing_message::{OutgoingMessage, OutgoingMessageSender};
+
+use tokio::sync::mpsc;
+
 
 use codex_core::config::Config as CodexConfig;
 use mcp_types::CallToolRequestParams;
 use mcp_types::CallToolResult;
-use mcp_types::CallToolResultContent;
 use mcp_types::ClientRequest;
-use mcp_types::JSONRPC_VERSION;
-use mcp_types::JSONRPCBatchRequest;
-use mcp_types::JSONRPCBatchResponse;
+use mcp_types::ContentBlock;
 use mcp_types::JSONRPCError;
 use mcp_types::JSONRPCErrorError;
-use mcp_types::JSONRPCMessage;
 use mcp_types::JSONRPCNotification;
 use mcp_types::JSONRPCRequest;
 use mcp_types::JSONRPCResponse;
@@ -25,11 +26,14 @@ use mcp_types::ServerCapabilitiesTools;
 use mcp_types::ServerNotification;
 use mcp_types::TextContent;
 use serde_json::json;
-use tokio::sync::mpsc;
 use tokio::task;
 
+/// Central processor for handling incoming MCP messages and producing outgoing
+/// notifications/responses. This needs to be public so integration tests in
+/// the `mcp-server` crate can construct a `MessageProcessor` directly and
+/// verify basic functionality without spinning up the full binary.
 pub struct MessageProcessor {
-    outgoing: mpsc::Sender<JSONRPCMessage>,
+    outgoing: Arc<OutgoingMessageSender>,
     initialized: bool,
     codex_linux_sandbox_exe: Option<PathBuf>,
 }
@@ -37,18 +41,40 @@ pub struct MessageProcessor {
 impl MessageProcessor {
     /// Create a new `MessageProcessor`, retaining a handle to the outgoing
     /// `Sender` so handlers can enqueue messages to be written to stdout.
-    pub fn new(
-        outgoing: mpsc::Sender<JSONRPCMessage>,
+    /// Create a new [`MessageProcessor`].
+    ///
+    /// This is kept `pub` (as opposed to `pub(crate)`) so that external test
+    /// code – such as the black-box tests living in `mcp-server/tests` – can
+    /// instantiate the processor directly.
+    /// Create a new `MessageProcessor` backed by an [`OutgoingMessageSender`].
+    ///
+    /// This constructor is used by the production code path where the caller
+    /// already owns an `OutgoingMessageSender` instance.
+    pub fn new_with_sender(
+        outgoing: OutgoingMessageSender,
         codex_linux_sandbox_exe: Option<PathBuf>,
     ) -> Self {
         Self {
-            outgoing,
+            outgoing: Arc::new(outgoing),
             initialized: false,
             codex_linux_sandbox_exe,
         }
     }
 
-    pub fn process_request(&mut self, request: JSONRPCRequest) {
+    /// Convenience constructor for use in black-box tests where the caller is
+    /// only interested in whether a `MessageProcessor` can be instantiated.
+    /// The provided `mpsc::Sender<JSONRPCMessage>` is currently ignored – the
+    /// processor creates an internal channel because it operates on its own
+    /// `OutgoingMessage` enum.
+    pub fn new(
+        _outgoing_tx: mpsc::Sender<mcp_types::JSONRPCMessage>,
+        codex_linux_sandbox_exe: Option<PathBuf>,
+    ) -> Self {
+        let (internal_tx, _internal_rx) = mpsc::channel::<OutgoingMessage>(128);
+        Self::new_with_sender(OutgoingMessageSender::new(internal_tx), codex_linux_sandbox_exe)
+    }
+
+    pub(crate) async fn process_request(&mut self, request: JSONRPCRequest) {
         // Hold on to the ID so we can respond.
         let request_id = request.id.clone();
 
@@ -63,10 +89,10 @@ impl MessageProcessor {
         // Dispatch to a dedicated handler for each request type.
         match client_request {
             ClientRequest::InitializeRequest(params) => {
-                self.handle_initialize(request_id, params);
+                self.handle_initialize(request_id, params).await;
             }
             ClientRequest::PingRequest(params) => {
-                self.handle_ping(request_id, params);
+                self.handle_ping(request_id, params).await;
             }
             ClientRequest::ListResourcesRequest(params) => {
                 self.handle_list_resources(params);
@@ -90,10 +116,10 @@ impl MessageProcessor {
                 self.handle_get_prompt(params);
             }
             ClientRequest::ListToolsRequest(params) => {
-                self.handle_list_tools(request_id, params);
+                self.handle_list_tools(request_id, params).await;
             }
             ClientRequest::CallToolRequest(params) => {
-                self.handle_call_tool(request_id, params);
+                self.handle_call_tool(request_id, params).await;
             }
             ClientRequest::SetLevelRequest(params) => {
                 self.handle_set_level(params);
@@ -105,8 +131,10 @@ impl MessageProcessor {
     }
 
     /// Handle a standalone JSON-RPC response originating from the peer.
-    pub(crate) fn process_response(&mut self, response: JSONRPCResponse) {
+    pub(crate) async fn process_response(&mut self, response: JSONRPCResponse) {
         tracing::info!("<- response: {:?}", response);
+        let JSONRPCResponse { id, result, .. } = response;
+        self.outgoing.notify_client_response(id, result).await
     }
 
     /// Handle a fire-and-forget JSON-RPC notification.
@@ -146,42 +174,12 @@ impl MessageProcessor {
         }
     }
 
-    /// Handle a batch of requests and/or notifications.
-    pub(crate) fn process_batch_request(&mut self, batch: JSONRPCBatchRequest) {
-        tracing::info!("<- batch request containing {} item(s)", batch.len());
-        for item in batch {
-            match item {
-                mcp_types::JSONRPCBatchRequestItem::JSONRPCRequest(req) => {
-                    self.process_request(req);
-                }
-                mcp_types::JSONRPCBatchRequestItem::JSONRPCNotification(note) => {
-                    self.process_notification(note);
-                }
-            }
-        }
-    }
-
     /// Handle an error object received from the peer.
     pub(crate) fn process_error(&mut self, err: JSONRPCError) {
         tracing::error!("<- error: {:?}", err);
     }
 
-    /// Handle a batch of responses/errors.
-    pub(crate) fn process_batch_response(&mut self, batch: JSONRPCBatchResponse) {
-        tracing::info!("<- batch response containing {} item(s)", batch.len());
-        for item in batch {
-            match item {
-                mcp_types::JSONRPCBatchResponseItem::JSONRPCResponse(resp) => {
-                    self.process_response(resp);
-                }
-                mcp_types::JSONRPCBatchResponseItem::JSONRPCError(err) => {
-                    self.process_error(err);
-                }
-            }
-        }
-    }
-
-    fn handle_initialize(
+    async fn handle_initialize(
         &mut self,
         id: RequestId,
         params: <mcp_types::InitializeRequest as ModelContextProtocolRequest>::Params,
@@ -190,19 +188,12 @@ impl MessageProcessor {
 
         if self.initialized {
             // Already initialised: send JSON-RPC error response.
-            let error_msg = JSONRPCMessage::Error(JSONRPCError {
-                jsonrpc: JSONRPC_VERSION.into(),
-                id,
-                error: JSONRPCErrorError {
-                    code: -32600, // Invalid Request
-                    message: "initialize called more than once".to_string(),
-                    data: None,
-                },
-            });
-
-            if let Err(e) = self.outgoing.try_send(error_msg) {
-                tracing::error!("Failed to send initialization error: {e}");
-            }
+            let error = JSONRPCErrorError {
+                code: -32600, // Invalid Request
+                message: "initialize called more than once".to_string(),
+                data: None,
+            };
+            self.outgoing.send_error(id, error).await;
             return;
         }
 
@@ -225,37 +216,33 @@ impl MessageProcessor {
             server_info: mcp_types::Implementation {
                 name: "codex-mcp-server".to_string(),
                 version: mcp_types::MCP_SCHEMA_VERSION.to_string(),
+                title: Some("Codex".to_string()),
             },
         };
 
-        self.send_response::<mcp_types::InitializeRequest>(id, result);
+        self.send_response::<mcp_types::InitializeRequest>(id, result)
+            .await;
     }
 
-    fn send_response<T>(&self, id: RequestId, result: T::Result)
+    async fn send_response<T>(&self, id: RequestId, result: T::Result)
     where
         T: ModelContextProtocolRequest,
     {
         // result has `Serialized` instance so should never fail
         #[expect(clippy::unwrap_used)]
-        let response = JSONRPCMessage::Response(JSONRPCResponse {
-            jsonrpc: JSONRPC_VERSION.into(),
-            id,
-            result: serde_json::to_value(result).unwrap(),
-        });
-
-        if let Err(e) = self.outgoing.try_send(response) {
-            tracing::error!("Failed to send response: {e}");
-        }
+        let result = serde_json::to_value(result).unwrap();
+        self.outgoing.send_response(id, result).await;
     }
 
-    fn handle_ping(
+    async fn handle_ping(
         &self,
         id: RequestId,
         params: <mcp_types::PingRequest as mcp_types::ModelContextProtocolRequest>::Params,
     ) {
         tracing::info!("ping -> params: {:?}", params);
         let result = json!({});
-        self.send_response::<mcp_types::PingRequest>(id, result);
+        self.send_response::<mcp_types::PingRequest>(id, result)
+            .await;
     }
 
     fn handle_list_resources(
@@ -308,7 +295,7 @@ impl MessageProcessor {
         tracing::info!("prompts/get -> params: {:?}", params);
     }
 
-    fn handle_list_tools(
+    async fn handle_list_tools(
         &self,
         id: RequestId,
         params: <mcp_types::ListToolsRequest as mcp_types::ModelContextProtocolRequest>::Params,
@@ -322,10 +309,11 @@ impl MessageProcessor {
             next_cursor: None,
         };
 
-        self.send_response::<mcp_types::ListToolsRequest>(id, result);
+        self.send_response::<mcp_types::ListToolsRequest>(id, result)
+            .await;
     }
 
-    fn handle_call_tool(
+    async fn handle_call_tool(
         &self,
         id: RequestId,
         params: <mcp_types::CallToolRequest as mcp_types::ModelContextProtocolRequest>::Params,
@@ -333,29 +321,28 @@ impl MessageProcessor {
         tracing::info!("tools/call -> params: {:?}", params);
         let CallToolRequestParams { name, arguments } = params;
 
+        // Route to appropriate tool handler
         match name.as_str() {
-            "codex" => {
-                self.handle_codex_tool_call(id, arguments);
-            }
-            "parallel_read" => {
-                self.handle_parallel_read_tool_call(id, arguments);
-            }
+            "codex" => self.handle_codex_tool_call(id, arguments).await,
+            "parallel_read" => self.handle_parallel_read_tool_call(id, arguments).await,
             _ => {
                 // Tool not found – return error result so the LLM can react.
                 let result = CallToolResult {
-                    content: vec![CallToolResultContent::TextContent(TextContent {
+                    content: vec![ContentBlock::TextContent(TextContent {
                         r#type: "text".to_string(),
                         text: format!("Unknown tool '{name}'"),
                         annotations: None,
                     })],
                     is_error: Some(true),
+                    structured_content: None,
                 };
-                self.send_response::<mcp_types::CallToolRequest>(id, result);
+                self.send_response::<mcp_types::CallToolRequest>(id, result)
+                    .await;
             }
         }
     }
 
-    fn handle_codex_tool_call(
+    async fn handle_codex_tool_call(
         &self,
         id: RequestId,
         arguments: Option<serde_json::Value>,
@@ -367,7 +354,7 @@ impl MessageProcessor {
                     Ok(cfg) => cfg,
                     Err(e) => {
                         let result = CallToolResult {
-                            content: vec![CallToolResultContent::TextContent(TextContent {
+                            content: vec![ContentBlock::TextContent(TextContent {
                                 r#type: "text".to_owned(),
                                 text: format!(
                                     "Failed to load Codex configuration from overrides: {e}"
@@ -375,27 +362,31 @@ impl MessageProcessor {
                                 annotations: None,
                             })],
                             is_error: Some(true),
+                            structured_content: None,
                         };
-                        self.send_response::<mcp_types::CallToolRequest>(id, result);
+                        self.send_response::<mcp_types::CallToolRequest>(id, result)
+                            .await;
                         return;
                     }
                 },
                 Err(e) => {
                     let result = CallToolResult {
-                        content: vec![CallToolResultContent::TextContent(TextContent {
+                        content: vec![ContentBlock::TextContent(TextContent {
                             r#type: "text".to_owned(),
                             text: format!("Failed to parse configuration for Codex tool: {e}"),
                             annotations: None,
                         })],
                         is_error: Some(true),
+                        structured_content: None,
                     };
-                    self.send_response::<mcp_types::CallToolRequest>(id, result);
+                    self.send_response::<mcp_types::CallToolRequest>(id, result)
+                        .await;
                     return;
                 }
             },
             None => {
                 let result = CallToolResult {
-                    content: vec![CallToolResultContent::TextContent(TextContent {
+                    content: vec![ContentBlock::TextContent(TextContent {
                         r#type: "text".to_string(),
                         text:
                             "Missing arguments for codex tool-call; the `prompt` field is required."
@@ -403,8 +394,10 @@ impl MessageProcessor {
                         annotations: None,
                     })],
                     is_error: Some(true),
+                    structured_content: None,
                 };
-                self.send_response::<mcp_types::CallToolRequest>(id, result);
+                self.send_response::<mcp_types::CallToolRequest>(id, result)
+                    .await;
                 return;
             }
         };
@@ -415,13 +408,13 @@ impl MessageProcessor {
         // Spawn an async task to handle the Codex session so that we do not
         // block the synchronous message-processing loop.
         task::spawn(async move {
-            // Run the Codex session and stream events back to the client.
+            // Run the Codex session and stream events Fck to the client.
             crate::codex_tool_runner::run_codex_tool_session(id, initial_prompt, config, outgoing)
                 .await;
         });
     }
 
-    fn handle_parallel_read_tool_call(
+    async fn handle_parallel_read_tool_call(
         &self,
         id: RequestId,
         arguments: Option<serde_json::Value>,
@@ -431,27 +424,29 @@ impl MessageProcessor {
                 Ok(params) => params,
                 Err(e) => {
                     let result = CallToolResult {
-                        content: vec![CallToolResultContent::TextContent(TextContent {
+                        content: vec![ContentBlock::TextContent(TextContent {
                             r#type: "text".to_string(),
                             text: format!("Failed to parse parameters for parallel_read tool: {}", e),
                             annotations: None,
                         })],
                         is_error: Some(true),
+                        structured_content: None,
                     };
-                    self.send_response::<mcp_types::CallToolRequest>(id, result);
+                    self.send_response::<mcp_types::CallToolRequest>(id, result).await;
                     return;
                 }
             },
             None => {
                 let result = CallToolResult {
-                    content: vec![CallToolResultContent::TextContent(TextContent {
+                    content: vec![ContentBlock::TextContent(TextContent {
                         r#type: "text".to_string(),
                         text: "Missing arguments for parallel_read tool-call; the `file_paths` field is required.".to_string(),
                         annotations: None,
                     })],
                     is_error: Some(true),
+                    structured_content: None,
                 };
-                self.send_response::<mcp_types::CallToolRequest>(id, result);
+                self.send_response::<mcp_types::CallToolRequest>(id, result).await;
                 return;
             }
         };
@@ -467,43 +462,31 @@ impl MessageProcessor {
             match serde_json::to_string_pretty(&result) {
                 Ok(json_output) => {
                     let call_result = CallToolResult {
-                        content: vec![CallToolResultContent::TextContent(TextContent {
+                        content: vec![ContentBlock::TextContent(TextContent {
                             r#type: "text".to_string(),
                             text: json_output,
                             annotations: None,
                         })],
                         is_error: Some(result.error_count > 0),
+                        structured_content: None,
                     };
                     
-                    let response = JSONRPCMessage::Response(JSONRPCResponse {
-                        jsonrpc: JSONRPC_VERSION.into(),
-                        id,
-                        result: serde_json::to_value(call_result).unwrap(),
-                    });
-                    
-                    if let Err(e) = outgoing.try_send(response) {
-                        tracing::error!("Failed to send parallel_read response: {}", e);
-                    }
+                    let result = serde_json::to_value(call_result).unwrap();
+                    outgoing.send_response(id, result).await;
                 }
                 Err(e) => {
                     let error_result = CallToolResult {
-                        content: vec![CallToolResultContent::TextContent(TextContent {
+                        content: vec![ContentBlock::TextContent(TextContent {
                             r#type: "text".to_string(),
                             text: format!("Failed to serialize parallel_read result: {}", e),
                             annotations: None,
                         })],
                         is_error: Some(true),
+                        structured_content: None,
                     };
                     
-                    let response = JSONRPCMessage::Response(JSONRPCResponse {
-                        jsonrpc: JSONRPC_VERSION.into(),
-                        id,
-                        result: serde_json::to_value(error_result).unwrap(),
-                    });
-                    
-                    if let Err(e) = outgoing.try_send(response) {
-                        tracing::error!("Failed to send parallel_read error response: {}", e);
-                    }
+                    let result = serde_json::to_value(error_result).unwrap();
+                    outgoing.send_response(id, result).await;
                 }
             }
         });
