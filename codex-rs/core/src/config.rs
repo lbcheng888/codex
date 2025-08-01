@@ -3,6 +3,8 @@ use crate::config_types::History;
 use crate::config_types::McpServerConfig;
 use crate::config_types::ReasoningEffort;
 use crate::config_types::ReasoningSummary;
+use crate::config_types::SandboxMode;
+use crate::config_types::SandboxWorkplaceWrite;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::config_types::ShellEnvironmentPolicyToml;
 use crate::config_types::Tui;
@@ -12,6 +14,7 @@ use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;
 use crate::openai_model_info::get_model_info;
 use crate::protocol::AskForApproval;
+use crate::protocol::SandboxPolicy;
 use dirs::home_dir;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -58,7 +61,10 @@ pub struct Config {
     pub disable_response_storage: bool,
 
     /// User-provided instructions from instructions.md.
-    pub instructions: Option<String>,
+    pub user_instructions: Option<String>,
+
+    /// Base instructions override.
+    pub base_instructions: Option<String>,
 
     /// Optional external notifier command. When set, Codex will spawn this
     /// program after each completed *turn* (i.e. when the agent finishes
@@ -134,6 +140,9 @@ pub struct Config {
 
     /// Experimental rollout resume path (absolute path to .jsonl; undocumented).
     pub experimental_resume: Option<PathBuf>,
+
+    /// Include an experimental plan tool that the model can use to update its current plan and status of each step.
+    pub include_plan_tool: bool,
 }
 
 impl Config {
@@ -148,7 +157,7 @@ impl Config {
         overrides: ConfigOverrides,
     ) -> std::io::Result<Self> {
         crate::debug_log!("[CONFIG] Loading config with overrides: {:?}", overrides);
-        
+
         // Resolve the directory that stores Codex state (e.g. ~/.codex or the
         // value of $CODEX_HOME) so we can embed it into the resulting
         // `Config` instance.
@@ -258,9 +267,14 @@ pub struct ConfigToml {
     /// Default approval policy for executing commands.
     pub approval_policy: Option<AskForApproval>,
 
+    /// Sandbox mode configuration (removed functionality, kept for compatibility)
+    pub sandbox_mode: Option<SandboxMode>,
+
+    /// Sandbox workspace write configuration (removed functionality, kept for compatibility)
+    pub sandbox_workspace_write: Option<SandboxWorkplaceWrite>,
+
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
-
 
     /// Disable server-side response storage (sends the full conversation
     /// context with every request). Currently necessary for OpenAI customers
@@ -318,9 +332,31 @@ pub struct ConfigToml {
 
     /// Experimental rollout resume path (absolute path to .jsonl; undocumented).
     pub experimental_resume: Option<PathBuf>,
+
+    /// Experimental path to a file whose contents replace the built-in BASE_INSTRUCTIONS.
+    pub experimental_instructions_file: Option<PathBuf>,
 }
 
-impl ConfigToml {}
+impl ConfigToml {
+    /// Derive the effective sandbox policy from the configuration.
+    #[allow(dead_code)]
+    fn derive_sandbox_policy(&self, sandbox_mode_override: Option<SandboxMode>) -> SandboxPolicy {
+        let resolved_sandbox_mode = sandbox_mode_override
+            .or(self.sandbox_mode)
+            .unwrap_or_default();
+        match resolved_sandbox_mode {
+            SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
+            SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
+                Some(s) => SandboxPolicy::WorkspaceWrite {
+                    writable_roots: s.writable_roots.iter().map(PathBuf::from).collect(),
+                    network_access: s.network_access,
+                },
+                None => SandboxPolicy::new_workspace_write_policy(),
+            },
+            SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
+        }
+    }
+}
 
 /// Optional overrides for user configuration (e.g., from CLI flags).
 #[derive(Default, Debug, Clone)]
@@ -330,6 +366,9 @@ pub struct ConfigOverrides {
     pub approval_policy: Option<AskForApproval>,
     pub model_provider: Option<String>,
     pub config_profile: Option<String>,
+    pub codex_linux_sandbox_exe: Option<PathBuf>,
+    pub base_instructions: Option<String>,
+    pub include_plan_tool: Option<bool>,
 }
 
 impl Config {
@@ -340,9 +379,7 @@ impl Config {
         overrides: ConfigOverrides,
         codex_home: PathBuf,
     ) -> std::io::Result<Self> {
-        crate::debug_log!("[CONFIG] Base config loaded, applying profile: {:?}", overrides.config_profile);
-        
-        let instructions = Self::load_instructions(Some(&codex_home));
+        let user_instructions = Self::load_instructions(Some(&codex_home));
 
         // Destructure ConfigOverrides fully to ensure all overrides are applied.
         let ConfigOverrides {
@@ -351,6 +388,9 @@ impl Config {
             approval_policy,
             model_provider,
             config_profile: config_profile_key,
+            codex_linux_sandbox_exe: _,
+            base_instructions,
+            include_plan_tool,
         } = overrides;
 
         let config_profile = match config_profile_key.as_ref().or(cfg.profile.as_ref()) {
@@ -366,7 +406,6 @@ impl Config {
                 .clone(),
             None => ConfigProfile::default(),
         };
-
 
         let mut model_providers = built_in_model_providers();
         // Merge user-defined providers into the built-in list.
@@ -387,8 +426,12 @@ impl Config {
                 )
             })?
             .clone();
-            
-        crate::debug_log!("[CONFIG] Model provider resolved: {} -> {:?}", model_provider_id, model_provider);
+
+        crate::debug_log!(
+            "[CONFIG] Model provider resolved: {} -> {:?}",
+            model_provider_id,
+            model_provider
+        );
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
 
@@ -417,9 +460,9 @@ impl Config {
             .or(config_profile.model)
             .or(cfg.model)
             .unwrap_or_else(default_model);
-        
+
         crate::debug_log!("[CONFIG] Model selected: {}", model);
-        
+
         let openai_model_info = get_model_info(&model);
         let model_context_window = cfg
             .model_context_window
@@ -431,6 +474,15 @@ impl Config {
         });
 
         let experimental_resume = cfg.experimental_resume;
+
+        // Load base instructions override from a file if specified. If the
+        // path is relative, resolve it against the effective cwd so the
+        // behaviour matches other path-like config values.
+        let file_base_instructions = Self::get_base_instructions(
+            cfg.experimental_instructions_file.as_ref(),
+            &resolved_cwd,
+        )?;
+        let base_instructions = base_instructions.or(file_base_instructions);
 
         let config = Self {
             model,
@@ -449,7 +501,8 @@ impl Config {
                 .or(cfg.disable_response_storage)
                 .unwrap_or(false),
             notify: cfg.notify,
-            instructions,
+            user_instructions,
+            base_instructions,
             mcp_servers: cfg.mcp_servers,
             model_providers,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(PROJECT_DOC_MAX_BYTES),
@@ -478,6 +531,7 @@ impl Config {
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
 
             experimental_resume,
+            include_plan_tool: include_plan_tool.unwrap_or(false),
         };
         Ok(config)
     }
@@ -498,6 +552,48 @@ impl Config {
             }
         })
     }
+
+    fn get_base_instructions(
+        path: Option<&PathBuf>,
+        cwd: &Path,
+    ) -> std::io::Result<Option<String>> {
+        let p = match path.as_ref() {
+            None => return Ok(None),
+            Some(p) => p,
+        };
+
+        // Resolve relative paths against the provided cwd to make CLI
+        // overrides consistent regardless of where the process was launched
+        // from.
+        let full_path = if p.is_relative() {
+            cwd.join(p)
+        } else {
+            p.to_path_buf()
+        };
+
+        let contents = std::fs::read_to_string(&full_path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to read experimental instructions file {}: {e}",
+                    full_path.display()
+                ),
+            )
+        })?;
+
+        let s = contents.trim().to_string();
+        if s.is_empty() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "experimental instructions file is empty: {}",
+                    full_path.display()
+                ),
+            ))
+        } else {
+            Ok(Some(s))
+        }
+    }
 }
 
 fn default_model() -> String {
@@ -512,7 +608,7 @@ fn default_model() -> String {
 ///   function will Err if the path does not exist.
 /// - If `CODEX_HOME` is not set, this function does not verify that the
 ///   directory exists.
-fn find_codex_home() -> std::io::Result<PathBuf> {
+pub fn find_codex_home() -> std::io::Result<PathBuf> {
     // Honor the `CODEX_HOME` environment variable when it is set to allow users
     // (and tests) to override the default location.
     if let Ok(val) = std::env::var("CODEX_HOME") {
@@ -579,7 +675,6 @@ persistence = "none"
             history_no_persistence_cfg.history
         );
     }
-
 
     struct PrecedenceTestFixture {
         cwd: TempDir,
@@ -651,7 +746,7 @@ disable_response_storage = true
 
         let openai_chat_completions_provider = ModelProviderInfo {
             name: "OpenAI using Chat Completions".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: Some("https://api.openai.com/v1".to_string()),
             env_key: Some("OPENAI_API_KEY".to_string()),
             wire_api: crate::WireApi::Chat,
             env_key_instructions: None,
@@ -661,6 +756,7 @@ disable_response_storage = true
             request_max_retries: Some(4),
             stream_max_retries: Some(10),
             stream_idle_timeout_ms: Some(300_000),
+            requires_auth: false,
         };
         let model_provider_map = {
             let mut model_provider_map = built_in_model_providers();
@@ -691,7 +787,7 @@ disable_response_storage = true
     ///
     /// 1. custom command-line argument, e.g. `--model o3`
     /// 2. as part of a profile, where the `--profile` is specified via a CLI
-    ///    (or in the config file itelf)
+    ///    (or in the config file itself)
     /// 3. as an entry in `config.toml`, e.g. `model = "o3"`
     /// 4. the default value for a required field defined in code, e.g.,
     ///    `crate::flags::OPENAI_DEFAULT_MODEL`
@@ -722,7 +818,7 @@ disable_response_storage = true
                 approval_policy: AskForApproval::Never,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 disable_response_storage: false,
-                instructions: None,
+                user_instructions: None,
                 notify: None,
                 cwd: fixture.cwd(),
                 mcp_servers: HashMap::new(),
@@ -738,6 +834,8 @@ disable_response_storage = true
                 model_supports_reasoning_summaries: false,
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
                 experimental_resume: None,
+                base_instructions: None,
+                include_plan_tool: false,
             },
             o3_profile_config
         );
@@ -767,7 +865,7 @@ disable_response_storage = true
             approval_policy: AskForApproval::UnlessTrusted,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             disable_response_storage: false,
-            instructions: None,
+            user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
             mcp_servers: HashMap::new(),
@@ -783,6 +881,8 @@ disable_response_storage = true
             model_supports_reasoning_summaries: false,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             experimental_resume: None,
+            base_instructions: None,
+            include_plan_tool: false,
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -827,7 +927,7 @@ disable_response_storage = true
             approval_policy: AskForApproval::OnFailure,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             disable_response_storage: true,
-            instructions: None,
+            user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
             mcp_servers: HashMap::new(),
@@ -843,6 +943,8 @@ disable_response_storage = true
             model_supports_reasoning_summaries: false,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             experimental_resume: None,
+            base_instructions: None,
+            include_plan_tool: false,
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);

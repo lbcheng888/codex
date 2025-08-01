@@ -9,8 +9,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use codex_common::CliConfigOverrides;
-use codex_core::codex_wrapper::init_codex;
+use codex_core::codex_wrapper::{init_codex, CodexConversation};
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::protocol::{InputItem, Op};
@@ -28,8 +27,7 @@ use reedline::{KeyCode, KeyModifiers};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::unbounded_channel;
-use tokio::time::{self, Duration};
-use tracing::{error, info};
+use tracing::error;
 
 use codex_core::protocol::{EventMsg, TaskCompleteEvent};
 
@@ -41,6 +39,7 @@ use tui_markdown; // already dependency via codex-tui
 /// formatting are kept as plain text while basic inline styles (bold, italic
 /// and underline) are mapped to the corresponding SGR sequences.  All other
 /// markup is stripped.
+#[allow(dead_code)]
 fn markdown_to_ansi(src: &str) -> String {
     // Parse the markdown into `ratatui::text::Text` using the same renderer
     // used by the fullscreen TUI implementation so we keep behaviour
@@ -70,6 +69,7 @@ fn markdown_to_ansi(src: &str) -> String {
 /// Translate a `ratatui::style::Style` into an ANSI SGR prefix.  Only a subset
 /// of style attributes are handled as required by the current markdown
 /// renderer.
+#[allow(dead_code)]
 fn style_to_ansi(style: &Style) -> String {
     let mut codes: Vec<&str> = Vec::new();
 
@@ -101,6 +101,7 @@ fn style_to_ansi(style: &Style) -> String {
 /// Only colours that are actually produced by the markdown renderer are
 /// considered; for everything else we fall back to None so the caller can skip
 /// emitting a foreground colour.
+#[allow(dead_code)]
 fn color_to_ansi(color: Color) -> Option<&'static str> {
     match color {
         Color::Black => Some("30"),
@@ -130,8 +131,9 @@ use codex_tui::Cli as TuiCli;
 /// This is a best-effort implementation meant for environments where the
 /// alternate-screen based TUI cannot be used (e.g. inside tmux/screen splits or
 /// when the user explicitly opts out via `--no-tui`).
+#[allow(dead_code)]
 pub(crate) async fn run_native_cli(
-    mut interactive_cli: TuiCli,
+    interactive_cli: TuiCli,
     _codex_linux_sandbox_exe: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
@@ -151,6 +153,9 @@ pub(crate) async fn run_native_cli(
         approval_policy: Some(approval_policy),
         cwd: interactive_cli.cwd.clone(),
         model_provider: None,
+        codex_linux_sandbox_exe: None,
+        base_instructions: None,
+        include_plan_tool: None,
     };
 
     // Parse any `-c key=value` overrides.
@@ -171,7 +176,12 @@ pub(crate) async fn run_native_cli(
     }
 
     // Initialize Codex backend.
-    let (codex_wrapper, session_event, ctrl_c) = init_codex(config.clone()).await?;
+    let CodexConversation {
+        codex: codex_wrapper,
+        session_configured: session_event,
+        ctrl_c,
+        ..
+    } = init_codex(config.clone()).await?;
     println!("Codex session initialized: {:?}", session_event.msg);
 
     let codex = Arc::new(codex_wrapper);
@@ -316,7 +326,6 @@ pub(crate) async fn run_native_cli(
                         exit_flag.store(true, Ordering::SeqCst);
                         break; // exit loop
                     }
-                    Ok(_) => {}
                     Err(err) => {
                         eprintln!("Readline error: {err}");
                         break;
@@ -370,6 +379,7 @@ pub(crate) async fn run_native_cli(
 }
 
 /// Extremely small renderer that prints a subset of events.
+#[allow(dead_code)]
 fn print_event_to_stdout(event: &Event) {
     match &event.msg {
         EventMsg::AgentMessage(agent) => {

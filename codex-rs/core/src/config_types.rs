@@ -87,25 +87,38 @@ pub struct Tui {
     /// the mouse is not possible, though the keyboard shortcuts e.g. `b` and
     /// `space` still work. This allows the user to select text in the TUI
     /// using the mouse without needing to hold down a modifier key.
-    #[serde(default)]
     pub disable_mouse_capture: bool,
 
-    /// By default the TUI switches the terminal into the so-called
-    /// "alternate screen" buffer (via the ANSI **smcup** / **rmcup**
-    /// capabilities).  While this provides a clean, full-screen
-    /// interface, it has a number of downsides:
-    ///
-    ///   * The normal scroll-back buffer is hidden, meaning the user cannot
-    ///     simply scroll up in their terminal to review previous output.
-    ///   * Selecting text with the mouse for copy-and-paste is often
-    ///     clunkier because the alternate screen captures the selection and
-    ///     many terminals disable the native copy shortcut.
-    ///
-    /// Setting this flag to `true` prevents the TUI from entering the
-    /// alternate screen, allowing the terminal to retain its native
-    /// scroll-back buffer and selection behaviour.
+    /// Whether to disable alternate screen mode in the TUI.
+    pub disable_alternate_screen: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    #[serde(rename = "read-only")]
+    #[default]
+    ReadOnly,
+
+    #[serde(rename = "workspace-write")]
+    WorkspaceWrite,
+
+    #[serde(rename = "danger-full-access")]
+    DangerFullAccess,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct SandboxWorkplaceWrite {
     #[serde(default)]
     pub disable_alternate_screen: bool,
+
+    /// Writable root directories (removed functionality, kept for compatibility)
+    #[serde(default)]
+    pub writable_roots: Vec<String>,
+
+    /// Network access flag (removed functionality, kept for compatibility)
+    #[serde(default)]
+    pub network_access: bool,
 }
 
 // Manual `Default` implementation so we can enable a sensible default for
@@ -139,7 +152,6 @@ impl Default for Tui {
     }
 }
 
-
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ShellEnvironmentPolicyInherit {
@@ -170,6 +182,8 @@ pub struct ShellEnvironmentPolicyToml {
 
     /// List of regular expressions.
     pub include_only: Option<Vec<String>>,
+
+    pub experimental_use_profile: Option<bool>,
 }
 
 pub type EnvironmentVariablePattern = WildMatchPattern<'*', '?'>;
@@ -198,6 +212,9 @@ pub struct ShellEnvironmentPolicy {
 
     /// Environment variable names to retain in the environment.
     pub include_only: Vec<EnvironmentVariablePattern>,
+
+    /// If true, the shell profile will be used to run the command.
+    pub use_profile: bool,
 }
 
 impl From<ShellEnvironmentPolicyToml> for ShellEnvironmentPolicy {
@@ -217,6 +234,7 @@ impl From<ShellEnvironmentPolicyToml> for ShellEnvironmentPolicy {
             .into_iter()
             .map(|s| EnvironmentVariablePattern::new_case_insensitive(&s))
             .collect();
+        let use_profile = toml.experimental_use_profile.unwrap_or(false);
 
         Self {
             inherit,
@@ -224,6 +242,7 @@ impl From<ShellEnvironmentPolicyToml> for ShellEnvironmentPolicy {
             exclude,
             r#set,
             include_only,
+            use_profile,
         }
     }
 }

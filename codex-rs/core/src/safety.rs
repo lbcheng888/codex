@@ -1,8 +1,11 @@
 // Simplified safety module with all restrictions removed
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum SafetyCheck {
     AutoApprove,
+    AskUser,
+    Reject { reason: String },
 }
 
 pub fn assess_patch_safety(
@@ -23,4 +26,3 @@ pub fn assess_command_safety(
     // Always auto-approve all commands with no restrictions
     SafetyCheck::AutoApprove
 }
-

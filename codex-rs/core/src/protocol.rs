@@ -4,17 +4,57 @@
 //! between user and agent.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use mcp_types::CallToolResult;
 use serde::Deserialize;
 use serde::Serialize;
+use strum_macros::Display;
 use uuid::Uuid;
 
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::message_history::HistoryEntry;
 use crate::model_provider_info::ModelProviderInfo;
+use crate::plan_tool::UpdatePlanArgs;
+
+/// Sandbox execution type - simplified to only support no sandboxing
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SandboxType {
+    None,
+}
+
+/// Sandbox policy - simplified to only support full access
+#[derive(Debug, Clone, PartialEq)]
+pub enum SandboxPolicy {
+    DangerFullAccess,
+    WorkspaceWrite {
+        writable_roots: Vec<PathBuf>,
+        network_access: bool,
+    },
+}
+
+impl SandboxPolicy {
+    pub fn new_read_only_policy() -> Self {
+        Self::DangerFullAccess
+    }
+
+    pub fn new_workspace_write_policy() -> Self {
+        Self::WorkspaceWrite {
+            writable_roots: vec![],
+            network_access: false,
+        }
+    }
+
+    pub fn has_full_network_access(&self) -> bool {
+        match self {
+            Self::DangerFullAccess => true,
+            Self::WorkspaceWrite { network_access, .. } => *network_access,
+        }
+    }
+}
 
 /// Submission Queue Entry - requests from user
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -42,8 +82,12 @@ pub enum Op {
         model_reasoning_effort: ReasoningEffortConfig,
         model_reasoning_summary: ReasoningSummaryConfig,
 
-        /// Model instructions
-        instructions: Option<String>,
+        /// Model instructions that are appended to the base instructions.
+        user_instructions: Option<String>,
+
+        /// Base instructions override.
+        base_instructions: Option<String>,
+
         /// When to escalate for approval for execution
         approval_policy: AskForApproval,
         /// Disable server-side response storage (send full context each request)
@@ -108,18 +152,23 @@ pub enum Op {
 
     /// Request a single history entry identified by `log_id` + `offset`.
     GetHistoryEntryRequest { offset: usize, log_id: u64 },
+
+    /// Request to shut down codex instance.
+    Shutdown,
 }
 
 /// Determines the conditions under which the user is consulted to approve
 /// running the command proposed by Codex.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum AskForApproval {
     /// Under this policy, only "known safe" commands—as determined by
     /// `is_safe_command()`—that **only read files** are auto‑approved.
     /// Everything else will ask the user to approve.
     #[default]
     #[serde(rename = "untrusted")]
+    #[strum(serialize = "untrusted")]
     UnlessTrusted,
 
     /// *All* commands are auto‑approved, but they are expected to run inside a
@@ -163,8 +212,9 @@ pub struct Event {
 }
 
 /// Response event from the agent
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Display)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum EventMsg {
     /// Error while executing a submission
     Error(ErrorEvent),
@@ -218,6 +268,11 @@ pub enum EventMsg {
 
     /// Response to GetHistoryEntryRequest.
     GetHistoryEntryResponse(GetHistoryEntryResponseEvent),
+
+    PlanUpdate(UpdatePlanArgs),
+
+    /// Notification that the agent is shutting down.
+    ShutdownComplete,
 }
 
 // Individual event payload types matching each `EventMsg` variant.
@@ -242,6 +297,36 @@ pub struct TokenUsage {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FinalOutput {
+    pub token_usage: TokenUsage,
+}
+
+impl From<TokenUsage> for FinalOutput {
+    fn from(token_usage: TokenUsage) -> Self {
+        Self { token_usage }
+    }
+}
+
+impl fmt::Display for FinalOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let u = &self.token_usage;
+        write!(
+            f,
+            "Token usage: total={} input={}{} output={}{}",
+            u.total_tokens,
+            u.input_tokens,
+            u.cached_input_tokens
+                .map(|c| format!(" (cached {c})"))
+                .unwrap_or_default(),
+            u.output_tokens,
+            u.reasoning_output_tokens
+                .map(|r| format!(" (reasoning {r})"))
+                .unwrap_or_default()
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentMessageEvent {
     pub message: String,
 }
@@ -262,9 +347,7 @@ pub struct AgentReasoningDeltaEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct McpToolCallBeginEvent {
-    /// Identifier so this can be paired with the McpToolCallEnd event.
-    pub call_id: String,
+pub struct McpInvocation {
     /// Name of the MCP server as defined in the config.
     pub server: String,
     /// Name of the tool as given by the MCP server.
@@ -274,9 +357,18 @@ pub struct McpToolCallBeginEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpToolCallBeginEvent {
+    /// Identifier so this can be paired with the McpToolCallEnd event.
+    pub call_id: String,
+    pub invocation: McpInvocation,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpToolCallEndEvent {
     /// Identifier for the corresponding McpToolCallBegin that finished.
     pub call_id: String,
+    pub invocation: McpInvocation,
+    pub duration: Duration,
     /// Result of the tool call. Note this could be an error.
     pub result: Result<CallToolResult, String>,
 }
@@ -314,6 +406,8 @@ pub struct ExecCommandEndEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExecApprovalRequestEvent {
+    /// Identifier for the associated exec call, if available.
+    pub call_id: String,
     /// The command to be executed.
     pub command: Vec<String>,
     /// The command's working directory.
@@ -325,6 +419,8 @@ pub struct ExecApprovalRequestEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApplyPatchApprovalRequestEvent {
+    /// Responses API call id for the associated patch apply call, if available.
+    pub call_id: String,
     pub changes: HashMap<PathBuf, FileChange>,
     /// Optional explanatory reason (e.g. request for extra write access).
     #[serde(skip_serializing_if = "Option::is_none")]

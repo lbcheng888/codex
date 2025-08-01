@@ -2,9 +2,14 @@
 //!
 //! Provides a clean status bar with session info, model details, and connection status
 
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, BorderType, Paragraph, Widget, WidgetRef};
 use crate::theme::Theme;
+use ratatui::prelude::*;
+use ratatui::widgets::Block;
+use ratatui::widgets::BorderType;
+use ratatui::widgets::Borders;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
+use ratatui::widgets::WidgetRef;
 
 /// Modern status bar widget inspired by Claude Code
 #[allow(dead_code)]
@@ -17,6 +22,7 @@ pub struct StatusBar {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum SessionStatus {
     Connected,
     Connecting,
@@ -26,6 +32,7 @@ pub enum SessionStatus {
 
 impl StatusBar {
     /// Create a new status bar with the given theme
+    #[allow(dead_code)]
     pub fn new(theme: Theme) -> Self {
         Self {
             theme,
@@ -37,21 +44,25 @@ impl StatusBar {
     }
 
     /// Update the model name displayed in the status bar
+    #[allow(dead_code)]
     pub fn set_model_name(&mut self, name: String) {
         self.model_name = name;
     }
 
     /// Update the session status
+    #[allow(dead_code)]
     pub fn set_session_status(&mut self, status: SessionStatus) {
         self.session_status = status;
     }
 
     /// Update the message count
+    #[allow(dead_code)]
     pub fn set_message_count(&mut self, count: usize) {
         self.message_count = count;
     }
 
     /// Toggle showing detailed information
+    #[allow(dead_code)]
     pub fn toggle_details(&mut self) {
         self.show_details = !self.show_details;
     }
@@ -59,25 +70,23 @@ impl StatusBar {
     /// Get the status indicator text and style
     fn status_indicator(&self) -> (String, Style) {
         match self.session_status {
-            SessionStatus::Connected => {
-                ("●".to_string(), self.theme.success_indicator_style())
-            }
-            SessionStatus::Connecting => {
-                ("●".to_string(), self.theme.loading_style())
-            }
-            SessionStatus::Disconnected => {
-                ("●".to_string(), Style::default().fg(Color::Rgb(120, 120, 120)))
-            }
-            SessionStatus::Error => {
-                ("●".to_string(), Style::default().fg(self.theme.status.error))
-            }
+            SessionStatus::Connected => ("●".to_string(), self.theme.success_indicator_style()),
+            SessionStatus::Connecting => ("●".to_string(), self.theme.loading_style()),
+            SessionStatus::Disconnected => (
+                "●".to_string(),
+                Style::default().fg(Color::Rgb(120, 120, 120)),
+            ),
+            SessionStatus::Error => (
+                "●".to_string(),
+                Style::default().fg(self.theme.status.error),
+            ),
         }
     }
 
     /// Create the status text content
     fn create_status_text(&self) -> Text {
         let (indicator, indicator_style) = self.status_indicator();
-        
+
         let status_text = match self.session_status {
             SessionStatus::Connected => "Connected",
             SessionStatus::Connecting => "Connecting...",
@@ -96,9 +105,12 @@ impl StatusBar {
                 Span::styled(" • ", self.theme.separator_style()),
                 Span::styled(status_text, self.theme.inactive_item_style()),
             ]));
-            
+
             lines.push(Line::from(vec![
-                Span::styled(format!("{} messages", self.message_count), self.theme.dim_style()),
+                Span::styled(
+                    format!("{} messages", self.message_count),
+                    self.theme.dim_style(),
+                ),
                 Span::styled(" • ", self.theme.separator_style()),
                 Span::styled("F2 to collapse", self.theme.help_text_style()),
             ]));
@@ -109,14 +121,17 @@ impl StatusBar {
                 Span::raw(" "),
                 Span::styled(&self.model_name, self.theme.emphasis_style()),
             ];
-            
+
             let right_part = vec![
-                Span::styled(format!("{} msgs", self.message_count), self.theme.dim_style()),
+                Span::styled(
+                    format!("{} msgs", self.message_count),
+                    self.theme.dim_style(),
+                ),
                 Span::styled(" • ", self.theme.separator_style()),
                 Span::styled(status_text, self.theme.inactive_item_style()),
                 Span::styled(" • F2", self.theme.help_text_style()),
             ];
-            
+
             // Combine with proper spacing
             let mut combined = left_part;
             combined.extend(right_part);
@@ -153,4 +168,3 @@ impl WidgetRef for StatusBar {
         paragraph.render(inner, buf);
     }
 }
-

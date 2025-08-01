@@ -22,13 +22,6 @@ use crate::app_event_sender::AppEventSender;
 use crate::theme::Theme;
 use codex_file_search::FileMatch;
 
-/// Minimum number of visible text rows inside the textarea.
-const MIN_TEXTAREA_ROWS: usize = 1;
-/// Maximum number of visible text rows to prevent excessive height
-const MAX_TEXTAREA_ROWS: usize = 12;
-/// Rows consumed by the border.
-const BORDER_LINES: u16 = 2;
-
 const BASE_PLACEHOLDER_TEXT: &str = "send a message";
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
@@ -134,10 +127,6 @@ impl ChatComposer<'_> {
     ) -> bool {
         self.history
             .on_entry_response(log_id, offset, entry, &mut self.textarea)
-    }
-
-    pub fn set_input_focus(&mut self, has_focus: bool) {
-        self.update_border(has_focus);
     }
 
     pub fn handle_paste(&mut self, pasted: String) -> bool {
@@ -490,6 +479,17 @@ impl ChatComposer<'_> {
             }
         }
 
+        if let Input {
+            key: Key::Char('u'),
+            ctrl: true,
+            alt: false,
+            ..
+        } = input
+        {
+            self.textarea.delete_line_by_head();
+            return (InputResult::None, true);
+        }
+
         // Normal input handling
         self.textarea.input(input);
         let text_after = self.textarea.lines().join("\n");
@@ -613,22 +613,6 @@ impl ChatComposer<'_> {
         self.dismissed_file_popup_token = None;
     }
 
-    pub fn calculate_required_height(&self, area: &Rect) -> u16 {
-        // Constrain textarea height to prevent layout instability
-        let lines_count = self.textarea.lines().len();
-        let rows = lines_count.max(MIN_TEXTAREA_ROWS).min(MAX_TEXTAREA_ROWS);
-
-        let num_popup_rows = match &self.active_popup {
-            ActivePopup::Command(popup) => popup.calculate_required_height(area),
-            ActivePopup::File(popup) => popup.calculate_required_height(area),
-            ActivePopup::None => 0,
-        };
-
-        // Ensure we don't exceed available space
-        let total_height = rows as u16 + BORDER_LINES + num_popup_rows;
-        total_height.min(area.height / 2) // Never take more than half the screen
-    }
-
     fn update_border(&mut self, has_focus: bool) {
         struct BlockState {
             right_title: Line<'static>,
@@ -638,12 +622,12 @@ impl ChatComposer<'_> {
         let bs = if has_focus {
             if self.ctrl_c_quit_hint {
                 BlockState {
-                    right_title: self.create_keyboard_hint_line("Ctrl+C", "quit"),
+                    right_title: Line::from("Ctrl+C: quit"),
                     border_style: Style::default().fg(self.theme.ui.border_focused),
                 }
             } else {
                 BlockState {
-                    right_title: self.create_multi_keyboard_hints(),
+                    right_title: Line::from("Enter: send | Ctrl+C: quit"),
                     border_style: Style::default().fg(self.theme.ui.border_focused),
                 }
             }
@@ -663,40 +647,6 @@ impl ChatComposer<'_> {
                 .border_type(BorderType::Rounded)
                 .border_style(bs.border_style),
         );
-    }
-
-    /// Create a styled keyboard hint line with key and action
-    fn create_keyboard_hint_line(&self, key: &str, action: &str) -> Line<'static> {
-        use ratatui::text::Span;
-        Line::from(vec![
-            Span::styled(key.to_string(), self.theme.shortcut_key_style()),
-            Span::styled(" ".to_string(), Style::default()),
-            Span::styled(action.to_string(), self.theme.help_text_style()),
-        ])
-        .alignment(Alignment::Right)
-    }
-
-    /// Create multiple keyboard hints in a compact format
-    fn create_multi_keyboard_hints(&self) -> Line<'static> {
-        use ratatui::text::Span;
-        Line::from(vec![
-            Span::styled("Enter".to_string(), self.theme.shortcut_key_style()),
-            Span::styled(" to send".to_string(), self.theme.help_text_style()),
-            Span::styled(" | ".to_string(), self.theme.dim_style()),
-            Span::styled("Ctrl+D".to_string(), self.theme.shortcut_key_style()),
-            Span::styled(" to quit".to_string(), self.theme.help_text_style()),
-            Span::styled(" | ".to_string(), self.theme.dim_style()),
-            Span::styled("Ctrl+J".to_string(), self.theme.shortcut_key_style()),
-            Span::styled(" for newline".to_string(), self.theme.help_text_style()),
-        ])
-        .alignment(Alignment::Right)
-    }
-
-    pub(crate) fn is_popup_visible(&self) -> bool {
-        match self.active_popup {
-            ActivePopup::Command(_) | ActivePopup::File(_) => true,
-            ActivePopup::None => false,
-        }
     }
 }
 

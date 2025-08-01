@@ -110,12 +110,15 @@ stream_idle_timeout_ms = 300000    # 5m idle timeout
 ```
 
 #### request_max_retries
+
 How many times Codex will retry a failed HTTP request to the model provider. Defaults to `4`.
 
 #### stream_max_retries
+
 Number of times Codex will attempt to reconnect when a streaming response is interrupted. Defaults to `10`.
 
 #### stream_idle_timeout_ms
+
 How long Codex will wait for activity on a streaming response before treating the connection as lost. Defaults to `300_000` (5 minutes).
 
 ## model_provider
@@ -498,15 +501,5 @@ Options that are specific to the TUI.
 
 ```toml
 [tui]
-# Disable mouse capture so that your terminal continues to handle mouse events
-# natively – this gives you "click-and-drag to select/copy" straight out of the
-# box.  The trade-off is that the TUI will no longer receive mouse scroll
-# events, though you can still navigate with the keyboard using `b`, `space`,
-# and the arrow keys.
-#
-# Most terminal emulators let you *temporarily* disable mouse capture by
-# holding a modifier key (e.g. `Shift` or `Alt`) while selecting text.  With
-# the new default you no longer need this workaround, but you can always flip
-# the flag back to `false` if you prefer the old behaviour.
-disable_mouse_capture = true  # defaults to `true`
+# More to come here
 ```

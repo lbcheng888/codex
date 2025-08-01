@@ -1,8 +1,9 @@
+use codex_arg0::arg0_dispatch_or_else;
 use codex_mcp_server::run_main;
 
 fn main() -> anyhow::Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(async {
-        run_main(None).await?;
+    arg0_dispatch_or_else(|codex_linux_sandbox_exe| async move {
+        run_main(codex_linux_sandbox_exe).await?;
         Ok(())
     })
 }

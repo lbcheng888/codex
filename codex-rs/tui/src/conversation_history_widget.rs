@@ -129,16 +129,30 @@ impl ConversationHistoryWidget {
 
         let mut selected_text = String::new();
         let width = self.cached_width.get();
-        
+
         // Normalize selection bounds
         let (start_entry, start_line, start_col) = self.selection.start;
         let (end_entry, end_line, end_col) = self.selection.end;
-        
-        let (start_entry, start_line, start_col, end_entry, end_line, end_col) = 
+
+        let (start_entry, start_line, start_col, end_entry, end_line, end_col) =
             if (start_entry, start_line, start_col) <= (end_entry, end_line, end_col) {
-                (start_entry, start_line, start_col, end_entry, end_line, end_col)
+                (
+                    start_entry,
+                    start_line,
+                    start_col,
+                    end_entry,
+                    end_line,
+                    end_col,
+                )
             } else {
-                (end_entry, end_line, end_col, start_entry, start_line, start_col)
+                (
+                    end_entry,
+                    end_line,
+                    end_col,
+                    start_entry,
+                    start_line,
+                    start_col,
+                )
             };
 
         // Iterate through entries and extract selected text
@@ -149,31 +163,31 @@ impl ConversationHistoryWidget {
 
             // Extract text from the cell
             let cell_text = self.extract_text_from_cell(&entry.cell);
-            
+
             // Split into lines considering wrapping
             let wrapped_lines = self.wrap_text(&cell_text, width);
-            
+
             for (line_idx, line) in wrapped_lines.iter().enumerate() {
-                let in_range = (entry_idx == start_entry && line_idx >= start_line) ||
-                              (entry_idx > start_entry && entry_idx < end_entry) ||
-                              (entry_idx == end_entry && line_idx <= end_line);
-                
+                let in_range = (entry_idx == start_entry && line_idx >= start_line)
+                    || (entry_idx > start_entry && entry_idx < end_entry)
+                    || (entry_idx == end_entry && line_idx <= end_line);
+
                 if !in_range {
                     continue;
                 }
-                
+
                 let line_start = if entry_idx == start_entry && line_idx == start_line {
                     start_col.min(line.len())
                 } else {
                     0
                 };
-                
+
                 let line_end = if entry_idx == end_entry && line_idx == end_line {
                     end_col.min(line.len())
                 } else {
                     line.len()
                 };
-                
+
                 if line_start < line_end {
                     selected_text.push_str(&line[line_start..line_end]);
                     if line_idx < wrapped_lines.len() - 1 || entry_idx < end_entry {
@@ -193,30 +207,32 @@ impl ConversationHistoryWidget {
     /// Extract plain text from a HistoryCell
     fn extract_text_from_cell(&self, cell: &HistoryCell) -> String {
         match cell {
-            HistoryCell::WelcomeMessage { view } |
-            HistoryCell::UserPrompt { view } |
-            HistoryCell::AgentMessage { view } |
-            HistoryCell::AgentReasoning { view } |
-            HistoryCell::CompletedExecCommand { view } |
-            HistoryCell::CompletedMcpToolCall { view } => {
+            HistoryCell::WelcomeMessage { view }
+            | HistoryCell::UserPrompt { view }
+            | HistoryCell::AgentMessage { view }
+            | HistoryCell::AgentReasoning { view }
+            | HistoryCell::CompletedExecCommand { view }
+            | HistoryCell::CompletedMcpToolCall { view } => {
                 // Extract text from TextBlock
-                view.lines.iter()
+                view.lines
+                    .iter()
                     .map(|line| {
-                        line.spans.iter()
+                        line.spans
+                            .iter()
                             .map(|span| span.content.as_ref())
                             .collect::<String>()
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
-            },
+            }
             HistoryCell::ActiveExecCommand { command, .. } => {
                 format!("Running: {}", command)
-            },
-            HistoryCell::ActiveMcpToolCall { invocation, .. } => {
-                invocation.spans.iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            },
+            }
+            HistoryCell::ActiveMcpToolCall { invocation, .. } => invocation
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
             _ => String::new(),
         }
     }
@@ -226,7 +242,7 @@ impl ConversationHistoryWidget {
         if width == 0 {
             return vec![text.to_string()];
         }
-        
+
         let mut wrapped = Vec::new();
         for line in text.lines() {
             if line.len() <= width as usize {
@@ -293,11 +309,16 @@ impl ConversationHistoryWidget {
                     self.selection.end.1 = line - 1;
                 } else if entry > 0 {
                     self.selection.end.0 = entry - 1;
-                    self.selection.end.1 = self.entries[entry - 1].line_count.get().saturating_sub(1);
+                    self.selection.end.1 =
+                        self.entries[entry - 1].line_count.get().saturating_sub(1);
                 }
             }
             SelectionDirection::Down => {
-                let current_entry_lines = self.entries.get(entry).map(|e| e.line_count.get()).unwrap_or(0);
+                let current_entry_lines = self
+                    .entries
+                    .get(entry)
+                    .map(|e| e.line_count.get())
+                    .unwrap_or(0);
                 if line < current_entry_lines.saturating_sub(1) {
                     self.selection.end.1 = line + 1;
                 } else if entry < self.entries.len().saturating_sub(1) {
@@ -326,7 +347,9 @@ impl ConversationHistoryWidget {
         match mouse_event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Start selection
-                if let Some(pos) = self.mouse_to_text_position(mouse_event.column, mouse_event.row, area) {
+                if let Some(pos) =
+                    self.mouse_to_text_position(mouse_event.column, mouse_event.row, area)
+                {
                     self.selection.start = pos;
                     self.selection.end = pos;
                     self.selection.active = true;
@@ -355,7 +378,9 @@ impl ConversationHistoryWidget {
                         self.scroll_down(scroll_speed);
                     }
 
-                    if let Some(pos) = self.mouse_to_text_position(mouse_event.column, mouse_event.row, area) {
+                    if let Some(pos) =
+                        self.mouse_to_text_position(mouse_event.column, mouse_event.row, area)
+                    {
                         self.selection.end = pos;
 
                         // Update last known coordinates so autoscroll keeps
@@ -399,17 +424,17 @@ impl ConversationHistoryWidget {
             // Mouse is at or below the viewport top
             self.scroll_position + (y - area.y) as usize
         };
-        
+
         // Calculate relative X position, clamping to widget width
         let relative_x = if x < area.x {
             0
         } else {
             (x - area.x).min(area.width.saturating_sub(1)) as usize
         };
-        
+
         // Use relative_y directly as the target line
         let target_line = relative_y;
-        
+
         // Find which entry and line within entry
         let mut accumulated_lines = 0;
         for (entry_idx, entry) in self.entries.iter().enumerate() {
@@ -420,14 +445,16 @@ impl ConversationHistoryWidget {
             }
             accumulated_lines += entry_lines;
         }
-        
+
         None
     }
 
     /// Returns true if it needs a redraw.
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) -> bool {
         // Handle Ctrl+C for copy
-        if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('c') {
+        if key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && key_event.code == KeyCode::Char('c')
+        {
             if let Some(selected_text) = self.get_selected_text() {
                 // Copy to clipboard
                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
@@ -438,13 +465,19 @@ impl ConversationHistoryWidget {
         }
 
         // Handle Ctrl+A for select all
-        if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('a') {
+        if key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && key_event.code == KeyCode::Char('a')
+        {
             if !self.entries.is_empty() {
                 self.selection.active = true;
                 self.selection.start = (0, 0, 0);
                 let last_entry_idx = self.entries.len() - 1;
                 let last_entry_lines = self.entries[last_entry_idx].line_count.get();
-                self.selection.end = (last_entry_idx, last_entry_lines.saturating_sub(1), usize::MAX);
+                self.selection.end = (
+                    last_entry_idx,
+                    last_entry_lines.saturating_sub(1),
+                    usize::MAX,
+                );
             }
             return true;
         }
@@ -779,6 +812,7 @@ impl ConversationHistoryWidget {
         call_id: String,
         success: bool,
         result: Result<mcp_types::CallToolResult, String>,
+        theme: &Theme,
     ) {
         let width = self.cached_width.get();
         for entry in self.entries.iter_mut() {
@@ -796,6 +830,7 @@ impl ConversationHistoryWidget {
                         *start,
                         success,
                         result,
+                        theme,
                     );
                     entry.cell = completed;
 
@@ -810,59 +845,101 @@ impl ConversationHistoryWidget {
     }
 
     /// Get selection info for a specific entry
-    fn get_selection_info_for_entry(&self, entry_idx: usize, skip_lines: usize, visible_lines: usize) -> Option<SelectionInfo> {
+    fn get_selection_info_for_entry(
+        &self,
+        entry_idx: usize,
+        skip_lines: usize,
+        visible_lines: usize,
+    ) -> Option<SelectionInfo> {
         let (start_entry, start_line, start_col) = self.selection.start;
         let (end_entry, end_line, end_col) = self.selection.end;
-        
+
         // Normalize selection bounds
-        let (start_entry, start_line, start_col, end_entry, end_line, end_col) = 
+        let (start_entry, start_line, start_col, end_entry, end_line, end_col) =
             if (start_entry, start_line, start_col) <= (end_entry, end_line, end_col) {
-                (start_entry, start_line, start_col, end_entry, end_line, end_col)
+                (
+                    start_entry,
+                    start_line,
+                    start_col,
+                    end_entry,
+                    end_line,
+                    end_col,
+                )
             } else {
-                (end_entry, end_line, end_col, start_entry, start_line, start_col)
+                (
+                    end_entry,
+                    end_line,
+                    end_col,
+                    start_entry,
+                    start_line,
+                    start_col,
+                )
             };
-        
+
         if entry_idx < start_entry || entry_idx > end_entry {
             return None;
         }
-        
+
         Some(SelectionInfo {
-            start_line: if entry_idx == start_entry { start_line } else { 0 },
-            start_col: if entry_idx == start_entry { start_col } else { 0 },
-            end_line: if entry_idx == end_entry { end_line } else { usize::MAX },
-            end_col: if entry_idx == end_entry { end_col } else { usize::MAX },
+            start_line: if entry_idx == start_entry {
+                start_line
+            } else {
+                0
+            },
+            start_col: if entry_idx == start_entry {
+                start_col
+            } else {
+                0
+            },
+            end_line: if entry_idx == end_entry {
+                end_line
+            } else {
+                usize::MAX
+            },
+            end_col: if entry_idx == end_entry {
+                end_col
+            } else {
+                usize::MAX
+            },
             skip_lines,
             visible_lines,
         })
     }
 
     /// Render a cell with selection highlighting
-    fn render_cell_with_selection(&self, cell: &HistoryCell, skip_lines: usize, area: Rect, buf: &mut Buffer, selection_info: Option<SelectionInfo>) {
+    fn render_cell_with_selection(
+        &self,
+        cell: &HistoryCell,
+        skip_lines: usize,
+        area: Rect,
+        buf: &mut Buffer,
+        selection_info: Option<SelectionInfo>,
+    ) {
         // First render the cell normally
         cell.render_window(skip_lines, area, buf);
-        
+
         // Then apply selection highlighting
         if let Some(info) = selection_info {
             for y in 0..area.height {
                 let line_idx = skip_lines + y as usize;
-                
+
                 // Check if this line is within selection
                 if line_idx < info.start_line || line_idx > info.end_line {
                     continue;
                 }
-                
+
                 let start_x = if line_idx == info.start_line {
                     info.start_col.min(area.width as usize)
                 } else {
                     0
                 };
-                
+
                 let end_x = if line_idx == info.end_line {
                     info.end_col.min(area.width as usize)
                 } else {
                     area.width as usize
                 };
-                
+
                 // Apply selection style - use inverted colors instead of background
                 for x in start_x..end_x {
                     let pos = (area.x + x as u16, area.y + y);
@@ -875,7 +952,7 @@ impl ConversationHistoryWidget {
                             Style::default()
                                 .fg(new_fg)
                                 .bg(new_bg)
-                                .add_modifier(current_style.add_modifier)
+                                .add_modifier(current_style.add_modifier),
                         );
                     }
                 }
@@ -898,7 +975,7 @@ impl WidgetRef for ConversationHistoryWidget {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         // Save the render area for mouse coordinate conversion
         self.last_render_area.set(area);
-        
+
         // No border for conversation history - use the full area
         let inner = area;
         let viewport_height = inner.height as usize;
@@ -948,7 +1025,7 @@ impl WidgetRef for ConversationHistoryWidget {
 
         // Clear entire widget area first.
         Clear.render(area, buf);
-        
+
         // Ensure the background uses the theme's background color
         // Avoid painting a solid background so the widget inherits the
         // terminal’s default colours.  This prevents the “full-screen blue
@@ -991,15 +1068,25 @@ impl WidgetRef for ConversationHistoryWidget {
             };
 
             // Check if this entry has any selection
-            let entry_idx = self.entries.iter().position(|e| std::ptr::eq(e, entry)).unwrap_or(0);
+            let entry_idx = self
+                .entries
+                .iter()
+                .position(|e| std::ptr::eq(e, entry))
+                .unwrap_or(0);
             let selection_info = if self.selection.active {
                 self.get_selection_info_for_entry(entry_idx, lines_to_skip, visible_height)
             } else {
                 None
             };
-            
+
             // Render the cell with selection info
-            self.render_cell_with_selection(&entry.cell, lines_to_skip, cell_rect, buf, selection_info);
+            self.render_cell_with_selection(
+                &entry.cell,
+                lines_to_skip,
+                cell_rect,
+                buf,
+                selection_info,
+            );
 
             // Advance cursor inside viewport.
             y_cursor += visible_height as u16;

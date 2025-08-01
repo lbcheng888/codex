@@ -38,18 +38,18 @@ pub(crate) async fn chatgpt_get_request<T: DeserializeOwned>(
 
     let url = format!("{chatgpt_base_url}{path}");
 
-    let token = get_chatgpt_token_data()
-        .ok_or_else(|| anyhow::anyhow!("ChatGPT token not available"))?;
+    let token =
+        get_chatgpt_token_data().ok_or_else(|| anyhow::anyhow!("ChatGPT token not available"))?;
 
-    // Simple exponential back-off: 0.5s, 1s, 2s … (capped by REQUEST_TIMEOUT)
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
+    let account_id = token.account_id.ok_or_else(|| {
+        anyhow::anyhow!("ChatGPT account ID not available, please re-run `codex login`")
+    })?;
 
+    for attempt in 1..=MAX_RETRIES {
         let response_res = client
             .get(&url)
             .bearer_auth(&token.access_token)
-            .header("chatgpt-account-id", &token.account_id)
+            .header("chatgpt-account-id", &account_id)
             .header("Content-Type", "application/json")
             .header("User-Agent", "codex-cli")
             .send()
@@ -68,7 +68,7 @@ pub(crate) async fn chatgpt_get_request<T: DeserializeOwned>(
                 // For HTTP 5xx we retry; for others bail immediately.
                 if response.status().is_server_error() && attempt <= MAX_RETRIES {
                     tracing::warn!(
-                        "ChatGPT request to {} returned {} – retry {}/{}", 
+                        "ChatGPT request to {} returned {} – retry {}/{}",
                         url,
                         response.status(),
                         attempt,
@@ -85,8 +85,11 @@ pub(crate) async fn chatgpt_get_request<T: DeserializeOwned>(
                     return Err(err).context("Failed to send request");
                 }
                 tracing::warn!(
-                    "ChatGPT request to {} error: {} – retry {}/{}", 
-                    url, err, attempt, MAX_RETRIES
+                    "ChatGPT request to {} error: {} – retry {}/{}",
+                    url,
+                    err,
+                    attempt,
+                    MAX_RETRIES
                 );
             }
         }
@@ -95,4 +98,7 @@ pub(crate) async fn chatgpt_get_request<T: DeserializeOwned>(
         let backoff = Duration::from_millis(500u64.saturating_mul(1 << (attempt - 1).min(4)));
         tokio::time::sleep(backoff).await;
     }
+
+    // If we've exhausted all retries, return an error
+    anyhow::bail!("All retry attempts failed")
 }

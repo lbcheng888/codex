@@ -105,7 +105,7 @@ impl Theme {
     /// Claude Code theme with optional high contrast mode
     pub fn claude_inspired_with_contrast(high_contrast: bool) -> Self {
         let (bg_main, fg_main) = if high_contrast {
-            (Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255))  // Pure black bg, pure white fg
+            (Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)) // Pure black bg, pure white fg
         } else {
             // Use the terminal's canonical `Color::White` constant instead of an
             // RGB approximation so that terminals limited to 8/16 colours map
@@ -118,47 +118,55 @@ impl Theme {
 
         Self {
             primary: ThemePrimary {
-                accent: Color::Rgb(247, 144, 61),        // Claude's signature orange
+                accent: Color::Rgb(247, 144, 61), // Claude's signature orange
                 accent_secondary: Color::Rgb(79, 172, 254), // Claude's blue accent
                 background: bg_main,
                 foreground: fg_main,
             },
             messages: ThemeMessages {
                 user: MessageColors {
-                    background: if high_contrast { Color::Rgb(25, 25, 25) } else { Color::Rgb(28, 28, 28) },
+                    background: if high_contrast {
+                        Color::Rgb(25, 25, 25)
+                    } else {
+                        Color::Rgb(28, 28, 28)
+                    },
                     foreground: Color::White, // bright white for maximum contrast
-                    border: Color::Rgb(79, 172, 254),     // Claude blue for user messages
+                    border: Color::Rgb(79, 172, 254), // Claude blue for user messages
                 },
                 assistant: MessageColors {
-                    background: if high_contrast { Color::Rgb(18, 18, 18) } else { Color::Rgb(22, 22, 22) },
+                    background: if high_contrast {
+                        Color::Rgb(18, 18, 18)
+                    } else {
+                        Color::Rgb(22, 22, 22)
+                    },
                     foreground: Color::White,
-                    border: Color::Rgb(247, 144, 61),     // Claude orange for assistant messages
+                    border: Color::Rgb(247, 144, 61), // Claude orange for assistant messages
                 },
                 system: MessageColors {
-                    background: Color::Rgb(45, 55, 72),   // Blue-gray
+                    background: Color::Rgb(45, 55, 72),    // Blue-gray
                     foreground: Color::Rgb(255, 255, 255), // Pure white for maximum readability
-                    border: Color::Rgb(180, 180, 180),    // Light border
+                    border: Color::Rgb(180, 180, 180),     // Light border
                 },
                 error: MessageColors {
-                    background: Color::Rgb(127, 29, 29),  // Dark red
+                    background: Color::Rgb(127, 29, 29),   // Dark red
                     foreground: Color::Rgb(255, 200, 200), // Bright light red
-                    border: Color::Rgb(255, 100, 100),    // Bright red border
+                    border: Color::Rgb(255, 100, 100),     // Bright red border
                 },
             },
             ui: ThemeUI {
-                border_focused: Color::Rgb(247, 144, 61),    // Claude orange when focused
-                border_unfocused: Color::Rgb(60, 62, 73),    // Subtle gray when unfocused
-                input_background: Color::Rgb(25, 26, 35),    // Darker input background
+                border_focused: Color::Rgb(247, 144, 61), // Claude orange when focused
+                border_unfocused: Color::Rgb(60, 62, 73), // Subtle gray when unfocused
+                input_background: Color::Rgb(25, 26, 35), // Darker input background
                 input_foreground: Color::Rgb(245, 245, 245), // Softer white input text
-                selection: Color::Rgb(79, 172, 254),         // Claude blue selection
-                highlight: Color::Rgb(247, 144, 61),         // Claude orange highlight
+                selection: Color::Rgb(79, 172, 254),      // Claude blue selection
+                highlight: Color::Rgb(247, 144, 61),      // Claude orange highlight
             },
             status: ThemeStatus {
-                success: Color::Rgb(100, 255, 150),   // Bright green
-                warning: Color::Rgb(255, 220, 100),   // Bright yellow
-                error: Color::Rgb(255, 120, 120),     // Bright red  
-                info: Color::Rgb(120, 180, 255),      // Bright blue
-                loading: Color::Rgb(200, 150, 255),   // Bright purple
+                success: Color::Rgb(100, 255, 150), // Bright green
+                warning: Color::Rgb(255, 220, 100), // Bright yellow
+                error: Color::Rgb(255, 120, 120),   // Bright red
+                info: Color::Rgb(120, 180, 255),    // Bright blue
+                loading: Color::Rgb(200, 150, 255), // Bright purple
             },
         }
     }
@@ -174,8 +182,7 @@ impl Theme {
     /// Helper method to create border style for unfocused state (now unused)
     #[allow(dead_code)]
     pub fn unfocused_border_style(&self) -> Style {
-        Style::default()
-            .fg(self.ui.border_unfocused)
+        Style::default().fg(self.ui.border_unfocused)
     }
 
     /// Helper method for user message style (now unused)
@@ -197,8 +204,8 @@ impl Theme {
     /// Helper method for command/code style
     pub fn code_style(&self) -> Style {
         Style::default()
-            .fg(Color::Rgb(235, 235, 235))  // Slightly softer white for code
-            .bg(Color::Rgb(20, 21, 28))     // Even darker background for code blocks
+            .fg(Color::Rgb(235, 235, 235)) // Slightly softer white for code
+            .bg(Color::Rgb(20, 21, 28)) // Even darker background for code blocks
     }
 
     /// Helper method for emphasized/highlighted text
@@ -210,14 +217,13 @@ impl Theme {
 
     /// Helper method for dimmed/secondary text - subtle gray for hierarchy
     pub fn dim_style(&self) -> Style {
-        Style::default()
-            .fg(Color::Rgb(180, 180, 180))  // Subtle gray for secondary text
+        Style::default().fg(Color::Rgb(180, 180, 180)) // Subtle gray for secondary text
     }
 
     /// Helper method for popup/modal background
     pub fn popup_background_style(&self) -> Style {
         Style::default()
-            .bg(Color::Rgb(40, 44, 52))     // Dark popup background
+            .bg(Color::Rgb(40, 44, 52)) // Dark popup background
             .fg(self.primary.foreground)
     }
 
@@ -239,20 +245,19 @@ impl Theme {
     /// Helper method for active/selected item style
     pub fn active_item_style(&self) -> Style {
         Style::default()
-            .fg(self.ui.selection)          // Use selection color for text instead of background
+            .fg(self.ui.selection) // Use selection color for text instead of background
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     }
 
     /// Helper method for inactive/unselected item style
     pub fn inactive_item_style(&self) -> Style {
-        Style::default()
-            .fg(Color::Rgb(230, 230, 230))  // Bright white for primary content
+        Style::default().fg(Color::Rgb(230, 230, 230)) // Bright white for primary content
     }
 
     /// Helper method for subtle metadata/labels
+    #[allow(dead_code)]
     pub fn metadata_style(&self) -> Style {
-        Style::default()
-            .fg(Color::Rgb(160, 160, 160))  // Subtle gray for metadata
+        Style::default().fg(Color::Rgb(160, 160, 160)) // Subtle gray for metadata
     }
 
     /// Helper method for message headers with proper hierarchy
@@ -285,41 +290,44 @@ impl Theme {
 
     /// Helper method for separator line between panes
     pub fn separator_style(&self) -> Style {
-        Style::default()
-            .fg(Color::Rgb(60, 62, 73))     // Even more subtle separator to match Claude
+        Style::default().fg(Color::Rgb(60, 62, 73)) // Even more subtle separator to match Claude
     }
 
     /// Helper method for focus indicator style
+    #[allow(dead_code)]
     pub fn focus_indicator_style(&self) -> Style {
         Style::default()
             .fg(self.ui.highlight)
-            .bg(Color::Rgb(40, 44, 52))     // Dark background for indicator
+            .bg(Color::Rgb(40, 44, 52)) // Dark background for indicator
             .add_modifier(Modifier::BOLD)
     }
 
     /// Helper method for keyboard shortcut key style
+    #[allow(dead_code)]
     pub fn shortcut_key_style(&self) -> Style {
         Style::default()
-            .fg(Color::Rgb(26, 27, 38))     // Dark text
-            .bg(self.ui.highlight)          // Bright background
+            .fg(Color::Rgb(26, 27, 38)) // Dark text
+            .bg(self.ui.highlight) // Bright background
             .add_modifier(Modifier::BOLD)
     }
 
     /// Helper method for help text style
     pub fn help_text_style(&self) -> Style {
         Style::default()
-            .fg(Color::Rgb(255, 255, 255))  // Pure white for maximum readability
+            .fg(Color::Rgb(255, 255, 255)) // Pure white for maximum readability
             .add_modifier(Modifier::ITALIC)
     }
 
     /// Helper method for help overlay background
+    #[allow(dead_code)]
     pub fn help_overlay_background(&self) -> Style {
         Style::default()
-            .bg(Color::Rgb(30, 35, 45))     // Dark overlay background
+            .bg(Color::Rgb(30, 35, 45)) // Dark overlay background
             .fg(self.primary.foreground)
     }
 
     /// Helper method for help section header style
+    #[allow(dead_code)]
     pub fn help_section_header_style(&self) -> Style {
         Style::default()
             .fg(self.ui.highlight)
@@ -327,6 +335,7 @@ impl Theme {
     }
 
     /// Helper method for help category style
+    #[allow(dead_code)]
     pub fn help_category_style(&self) -> Style {
         Style::default()
             .fg(self.status.info)
@@ -338,7 +347,7 @@ impl Theme {
     pub fn user_bubble_style(&self) -> Style {
         Style::default()
             .fg(self.messages.user.foreground)
-            .bg(Color::Rgb(45, 55, 72))     // Slightly lighter than background
+            .bg(Color::Rgb(45, 55, 72)) // Slightly lighter than background
     }
 
     /// Helper method for modern assistant message bubble style  
@@ -346,15 +355,14 @@ impl Theme {
     pub fn assistant_bubble_style(&self) -> Style {
         Style::default()
             .fg(self.messages.assistant.foreground)
-            .bg(Color::Rgb(35, 45, 60))     // Subtle blue-gray background
+            .bg(Color::Rgb(35, 45, 60)) // Subtle blue-gray background
     }
-
 
     /// Helper method for message timestamp style
     #[allow(dead_code)]
     pub fn message_timestamp_style(&self) -> Style {
         Style::default()
-            .fg(Color::Rgb(120, 120, 120))  // Dim gray
+            .fg(Color::Rgb(120, 120, 120)) // Dim gray
             .add_modifier(Modifier::ITALIC)
     }
 
@@ -390,7 +398,7 @@ impl Theme {
     pub fn transition_highlight_style(&self) -> Style {
         Style::default()
             .fg(self.primary.foreground)
-            .bg(Color::Rgb(60, 90, 120))  // Blended highlight color
+            .bg(Color::Rgb(60, 90, 120)) // Blended highlight color
             .add_modifier(Modifier::BOLD)
     }
 
@@ -420,8 +428,8 @@ impl Theme {
     #[allow(dead_code)]
     pub fn accessibility_notification_style(&self) -> Style {
         Style::default()
-            .fg(Color::Rgb(255, 255, 255))  // Pure white
-            .bg(Color::Rgb(0, 100, 200))    // High contrast blue
+            .fg(Color::Rgb(255, 255, 255)) // Pure white
+            .bg(Color::Rgb(0, 100, 200)) // High contrast blue
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     }
 
@@ -429,8 +437,8 @@ impl Theme {
     #[allow(dead_code)]
     pub fn accessible_focus_style(&self) -> Style {
         Style::default()
-            .fg(Color::Rgb(0, 0, 0))        // Black text
-            .bg(Color::Rgb(255, 255, 0))    // Bright yellow background
+            .fg(Color::Rgb(0, 0, 0)) // Black text
+            .bg(Color::Rgb(255, 255, 0)) // Bright yellow background
             .add_modifier(Modifier::BOLD)
     }
 }

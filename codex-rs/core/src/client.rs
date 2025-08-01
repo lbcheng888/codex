@@ -1,20 +1,21 @@
-use std::io::BufRead;
-use std::path::Path;
 use std::time::Duration;
+use std::path::Path;
+use std::io::BufRead;
 
 use bytes::Bytes;
+use codex_login::AuthMode;
+use codex_login::CodexAuth;
 use eventsource_stream::Eventsource;
 use futures::prelude::*;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
-use tracing::debug;
 use tracing::trace;
 use tracing::warn;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::chat_completions::AggregateStreamExt;
@@ -28,10 +29,12 @@ use crate::config::Config;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::error::CodexErr;
+use crate::error::EnvVarError;
 use crate::error::Result;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::WireApi;
+use crate::models::ContentItem;
 use crate::models::ResponseItem;
 use crate::openai_tools::create_tools_json_for_responses_api;
 use crate::protocol::TokenUsage;
@@ -41,6 +44,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ModelClient {
     config: Arc<Config>,
+    auth: Option<CodexAuth>,
     client: reqwest::Client,
     provider: ModelProviderInfo,
     session_id: Uuid,
@@ -51,6 +55,7 @@ pub struct ModelClient {
 impl ModelClient {
     pub fn new(
         config: Arc<Config>,
+        auth: Option<CodexAuth>,
         provider: ModelProviderInfo,
         effort: ReasoningEffortConfig,
         summary: ReasoningSummaryConfig,
@@ -58,6 +63,7 @@ impl ModelClient {
     ) -> Self {
         Self {
             config,
+            auth,
             client: reqwest::Client::new(),
             provider,
             session_id,
@@ -70,16 +76,23 @@ impl ModelClient {
     /// the provider config.  Public callers always invoke `stream()` – the
     /// specialised helpers are private to avoid accidental misuse.
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
-        crate::debug_log!("[CLIENT] stream() called with {} input items", prompt.input.len());
-        crate::debug_log!("[CLIENT] Using provider: {:?}, model: {}", self.provider.wire_api, self.config.model);
-        crate::debug_log!("[CLIENT] Provider base_url: {}", self.provider.base_url);
+        crate::debug_log!(
+            "[CLIENT] stream() called with {} input items",
+            prompt.input.len()
+        );
+        crate::debug_log!(
+            "[CLIENT] Using provider: {:?}, model: {}",
+            self.provider.wire_api,
+            self.config.model
+        );
+        crate::debug_log!("[CLIENT] Provider base_url: {:?}", self.provider.base_url);
         crate::debug_log!("[CLIENT] Provider env_key: {:?}", self.provider.env_key);
-        
+
         match self.provider.wire_api {
             WireApi::Responses => {
                 crate::debug_log!("[CLIENT] Using Responses API");
                 self.stream_responses(prompt).await
-            },
+            }
             WireApi::Chat => {
                 crate::debug_log!("[CLIENT] Using Chat Completions API");
                 // Create the raw streaming connection first.
@@ -87,6 +100,7 @@ impl ModelClient {
                 let response_stream = stream_chat_completions(
                     prompt,
                     &self.config.model,
+                    self.config.include_plan_tool,
                     &self.client,
                     &self.provider,
                 )
@@ -122,24 +136,67 @@ impl ModelClient {
         if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
             // short circuit for tests
             warn!(path, "Streaming from fixture");
-            return stream_from_fixture(path, self.provider.clone()).await;
+            return self.stream_from_fixture_local(path, self.provider.clone()).await;
         }
 
+        let auth = self.auth.as_ref().ok_or_else(|| {
+            CodexErr::EnvVar(EnvVarError {
+                var: "OPENAI_API_KEY".to_string(),
+                instructions: Some("Create an API key (https://platform.openai.com) and export it as an environment variable.".to_string()),
+            })
+        })?;
+
+        let store = prompt.store && auth.mode != AuthMode::ChatGPT;
+
+        // For Azure providers, try to get token from the configured env_key first
+        let token = if let Some(env_key) = &self.provider.env_key {
+            if let Ok(azure_token) = std::env::var(env_key) {
+                azure_token
+            } else {
+                auth.get_token().await?
+            }
+        } else {
+            auth.get_token().await?
+        };
+
         let full_instructions = prompt.get_full_instructions(&self.config.model);
-        let tools_json = create_tools_json_for_responses_api(prompt, &self.config.model)?;
+        let tools_json = create_tools_json_for_responses_api(
+            prompt,
+            &self.config.model,
+            self.config.include_plan_tool,
+        )?;
         let reasoning = create_reasoning_param_for_request(&self.config, self.effort, self.summary);
+
+        // Request encrypted COT if we are not storing responses,
+        // otherwise reasoning items will be referenced by ID
+        let include: Vec<String> = if !store && reasoning.is_some() {
+            vec!["reasoning.encrypted_content".to_string()]
+        } else {
+            vec![]
+        };
+
+        let mut input_with_instructions = Vec::with_capacity(prompt.input.len() + 1);
+        if let Some(ui) = &prompt.user_instructions {
+            input_with_instructions.push(ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText { text: ui.clone() }],
+            });
+        }
+        input_with_instructions.extend(prompt.input.clone());
+
+        // Build the canonical Responses API payload (no simplified payload).
         let payload = ResponsesApiRequest {
             model: &self.config.model,
             instructions: &full_instructions,
-            input: &prompt.input,
+            input: &input_with_instructions,
             tools: &tools_json,
             tool_choice: "auto",
             parallel_tool_calls: false,
             reasoning,
-            previous_response_id: prompt.prev_id.clone(),
-            store: prompt.store,
-            // TODO: make this configurable
+            store,
             stream: true,
+            include,
         };
 
         trace!(
@@ -148,46 +205,85 @@ impl ModelClient {
             serde_json::to_string(&payload)?
         );
 
+        // Prefer provider's full URL, which should point to ".../responses"
+        // when wire_api == Responses.
+        let full_url = self.provider.get_full_url();
+
         let mut attempt = 0;
         let max_retries = self.provider.request_max_retries();
+
         loop {
             attempt += 1;
 
-            let req_builder = self
-                .provider
-                .create_request_builder(&self.client)?
-                .header("OpenAI-Beta", "responses=experimental")
-                .header("session_id", self.session_id.to_string())
+            // Use Bearer by default; for Azure with env_key configured, use that token as api-key header if required.
+            // We apply provider headers afterwards so provider can override or add specific headers.
+            let mut req_builder = self
+                .client
+                .post(&full_url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .header(reqwest::header::ACCEPT, "text/event-stream")
-                .json(&payload);
+                // Explicit session and originator headers for observability and tests
+                .header("session_id", self.session_id.to_string())
+                .header("originator", "codex_cli_rs");
+
+            // For Azure scenarios that require "api-key" header instead of Bearer, provider.apply_http_headers
+            // should inject it. As a safe default, attach Bearer when we have a token.
+            req_builder = req_builder.bearer_auth(&token).json(&payload);
+
+            let req_builder = self.provider.apply_http_headers(req_builder);
 
             let res = req_builder.send().await;
+            if let Ok(resp) = &res {
+                trace!(
+                    "Response status: {}, request-id: {}",
+                    resp.status(),
+                    resp.headers()
+                        .get("x-request-id")
+                        .map(|v| v.to_str().unwrap_or_default())
+                        .unwrap_or_default()
+                );
+            }
+
             match res {
                 Ok(resp) if resp.status().is_success() => {
-                    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+                    let content_type = resp
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
 
-                    // spawn task to process SSE
+                    trace!("Content-Type = '{}'", content_type);
+
+                    // If provider returns JSON (e.g., some Azure configurations), process as complete JSON.
+                    if content_type.contains("application/json") && !content_type.contains("event-stream") {
+                        let response_text = resp.text().await.map_err(CodexErr::Reqwest)?;
+                        let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+                        tokio::spawn(async move {
+                            if let Err(e) = process_complete_json_response(response_text, tx_event.clone()).await {
+                                let _ = tx_event.send(Err(e)).await;
+                            }
+                        });
+                        return Ok(ResponseStream { rx_event });
+                    }
+
+                    // Default: SSE stream
+                    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
                     let stream = resp.bytes_stream().map_err(CodexErr::Reqwest);
-                    tokio::spawn(process_sse(
+                    tokio::spawn(sse_shared::process_sse(
                         stream,
                         tx_event,
                         self.provider.stream_idle_timeout(),
                     ));
-
                     return Ok(ResponseStream { rx_event });
                 }
                 Ok(res) => {
                     let status = res.status();
-                    // The OpenAI Responses endpoint returns structured JSON bodies even for 4xx/5xx
-                    // errors. When we bubble early with only the HTTP status the caller sees an opaque
-                    // "unexpected status 400 Bad Request" which makes debugging nearly impossible.
-                    // Instead, read (and include) the response text so higher layers and users see the
-                    // exact error message (e.g. "Unknown parameter: 'input[0].metadata'"). The body is
-                    // small and this branch only runs on error paths so the extra allocation is
-                    // negligible.
                     if !(status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) {
-                        // Surface the error body to callers. Use `unwrap_or_default` per Clippy.
                         let body = res.text().await.unwrap_or_default();
+                        eprintln!("=== Codex-rs Responses Error ===");
+                        eprintln!("Status: {}", status);
+                        eprintln!("Body: {}", body);
+                        eprintln!("===============================");
                         return Err(CodexErr::UnexpectedStatus(status, body));
                     }
 
@@ -195,31 +291,34 @@ impl ModelClient {
                         return Err(CodexErr::RetryLimit(status));
                     }
 
-                    // Pull out Retry‑After header if present.
                     let retry_after_secs = res
                         .headers()
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok())
                         .and_then(|s| s.parse::<u64>().ok());
 
+                    // Unify delay units in seconds.
                     let delay = if status == StatusCode::TOO_MANY_REQUESTS {
-                        // For 429 errors, ensure minimum 60 seconds delay for Grok API rate limits
-                        let api_suggested_delay = retry_after_secs.unwrap_or(60);
-                        let minimum_delay = std::cmp::max(api_suggested_delay, 60);
+                        let api_suggested = retry_after_secs.unwrap_or(60);
+                        let minimum = std::cmp::max(api_suggested, 60);
                         crate::debug_log!(
-                            "[CLIENT] Rate limit hit (429). API suggested: {}s, Using: {}s", 
-                            retry_after_secs.unwrap_or(0), 
-                            minimum_delay
+                            "[CLIENT] 429 rate limited. API suggested: {}s, Using: {}s",
+                            retry_after_secs.unwrap_or(0),
+                            minimum
                         );
-                        Duration::from_secs(minimum_delay)
+                        Duration::from_secs(minimum)
                     } else {
-                        // For server errors, use existing backoff logic
                         retry_after_secs
-                            .map(|s| Duration::from_secs(s))
+                            .map(Duration::from_secs)
                             .unwrap_or_else(|| backoff(attempt))
                     };
-                    
-                    crate::debug_log!("[CLIENT] Retrying in {:?} (attempt {}/{})", delay, attempt, max_retries);
+
+                    crate::debug_log!(
+                        "[CLIENT] Retrying in {:?} (attempt {}/{})",
+                        delay,
+                        attempt,
+                        max_retries
+                    );
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => {
@@ -238,221 +337,215 @@ impl ModelClient {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct SseEvent {
-    #[serde(rename = "type")]
-    kind: String,
-    response: Option<Value>,
-    item: Option<Value>,
-    delta: Option<String>,
-}
+mod sse_shared {
+    use super::*;
+    use serde::Deserialize;
+    use serde::Serialize;
 
-#[derive(Debug, Deserialize)]
-struct ResponseCreated {}
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct SseEvent {
+        #[serde(rename = "type")]
+        pub kind: String,
+        pub response: Option<serde_json::Value>,
+        pub item: Option<serde_json::Value>,
+        pub delta: Option<String>,
+    }
 
-#[derive(Debug, Deserialize)]
-struct ResponseCompleted {
-    id: String,
-    usage: Option<ResponseCompletedUsage>,
-}
+    #[derive(Debug, Deserialize)]
+    pub struct ResponseCompleted {
+        pub id: String,
+        pub usage: Option<ResponseCompletedUsage>,
+    }
 
-#[derive(Debug, Deserialize)]
-struct ResponseCompletedUsage {
-    input_tokens: u64,
-    input_tokens_details: Option<ResponseCompletedInputTokensDetails>,
-    output_tokens: u64,
-    output_tokens_details: Option<ResponseCompletedOutputTokensDetails>,
-    total_tokens: u64,
-}
+    #[derive(Debug, Deserialize)]
+    pub struct ResponseCompletedUsage {
+        pub input_tokens: u64,
+        pub input_tokens_details: Option<ResponseCompletedInputTokensDetails>,
+        pub output_tokens: u64,
+        pub output_tokens_details: Option<ResponseCompletedOutputTokensDetails>,
+        pub total_tokens: u64,
+    }
 
-impl From<ResponseCompletedUsage> for TokenUsage {
-    fn from(val: ResponseCompletedUsage) -> Self {
-        TokenUsage {
-            input_tokens: val.input_tokens,
-            cached_input_tokens: val.input_tokens_details.map(|d| d.cached_tokens),
-            output_tokens: val.output_tokens,
-            reasoning_output_tokens: val.output_tokens_details.map(|d| d.reasoning_tokens),
-            total_tokens: val.total_tokens,
+    impl From<ResponseCompletedUsage> for TokenUsage {
+        fn from(val: ResponseCompletedUsage) -> Self {
+            TokenUsage {
+                input_tokens: val.input_tokens,
+                cached_input_tokens: val.input_tokens_details.map(|d| d.cached_tokens),
+                output_tokens: val.output_tokens,
+                reasoning_output_tokens: val.output_tokens_details.map(|d| d.reasoning_tokens),
+                total_tokens: val.total_tokens,
+            }
         }
     }
-}
 
-#[derive(Debug, Deserialize)]
-struct ResponseCompletedInputTokensDetails {
-    cached_tokens: u64,
-}
+    #[derive(Debug, Deserialize)]
+    pub struct ResponseCompletedInputTokensDetails {
+        pub cached_tokens: u64,
+    }
 
-#[derive(Debug, Deserialize)]
-struct ResponseCompletedOutputTokensDetails {
-    reasoning_tokens: u64,
-}
+    #[derive(Debug, Deserialize)]
+    pub struct ResponseCompletedOutputTokensDetails {
+        pub reasoning_tokens: u64,
+    }
 
-async fn process_sse<S>(
-    stream: S,
-    tx_event: mpsc::Sender<Result<ResponseEvent>>,
-    idle_timeout: Duration,
-) where
-    S: Stream<Item = Result<Bytes>> + Unpin,
-{
-    let mut stream = stream.eventsource();
+    pub async fn process_sse<S>(
+        stream: S,
+        tx_event: mpsc::Sender<Result<ResponseEvent>>,
+        idle_timeout: Duration,
+    ) where
+        S: futures::Stream<Item = Result<Bytes>> + Unpin,
+    {
+        let mut stream = stream.eventsource();
 
-    // If the stream stays completely silent for an extended period treat it as disconnected.
-    // The response id returned from the "complete" message.
-    let mut response_completed: Option<ResponseCompleted> = None;
+        let mut response_completed: Option<ResponseCompleted> = None;
 
-    loop {
-        let sse = match timeout(idle_timeout, stream.next()).await {
-            Ok(Some(Ok(sse))) => sse,
-            Ok(Some(Err(e))) => {
-                debug!("SSE Error: {e:#}");
-                let event = CodexErr::Stream(e.to_string());
-                let _ = tx_event.send(Err(event)).await;
-                return;
-            }
-            Ok(None) => {
-                match response_completed {
-                    Some(ResponseCompleted {
-                        id: response_id,
-                        usage,
-                    }) => {
-                        let event = ResponseEvent::Completed {
-                            response_id,
-                            token_usage: usage.map(Into::into),
-                        };
-                        let _ = tx_event.send(Ok(event)).await;
+        loop {
+            let sse = match tokio::time::timeout(idle_timeout, stream.next()).await {
+                Ok(Some(Ok(sse))) => sse,
+                Ok(Some(Err(e))) => {
+                    tracing::debug!("SSE Error: {e:#}");
+                    let event = CodexErr::Stream(e.to_string());
+                    let _ = tx_event.send(Err(event)).await;
+                    return;
+                }
+                Ok(None) => {
+                    match response_completed {
+                        Some(ResponseCompleted { id: response_id, usage }) => {
+                            let event = ResponseEvent::Completed {
+                                response_id,
+                                token_usage: usage.map(Into::into),
+                            };
+                            let _ = tx_event.send(Ok(event)).await;
+                        }
+                        None => {
+                            let _ = tx_event
+                                .send(Err(CodexErr::Stream(
+                                    "stream closed before response.completed".into(),
+                                )))
+                                .await;
+                        }
                     }
-                    None => {
+                    return;
+                }
+                Err(_) => {
+                    let _ = tx_event
+                        .send(Err(CodexErr::Stream("idle timeout waiting for SSE".into())))
+                        .await;
+                    return;
+                }
+            };
+
+            let event: SseEvent = match serde_json::from_str(&sse.data) {
+                Ok(event) => event,
+                Err(e) => {
+                    tracing::debug!("Failed to parse SSE event: {e}, data: {}", &sse.data);
+                    continue;
+                }
+            };
+
+            tracing::trace!(?event, "SSE event");
+            match event.kind.as_str() {
+                "response.output_item.done" => {
+                    let Some(item_val) = event.item else { continue };
+                    let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) else {
+                        tracing::debug!("failed to parse ResponseItem from output_item.done");
+                        continue;
+                    };
+
+                    let event = ResponseEvent::OutputItemDone(item);
+                    if tx_event.send(Ok(event)).await.is_err() {
+                        return;
+                    }
+                }
+                "response.output_text.delta" => {
+                    if let Some(delta) = event.delta {
+                        let event = ResponseEvent::OutputTextDelta(delta);
+                        if tx_event.send(Ok(event)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                "response.reasoning_summary_text.delta" => {
+                    if let Some(delta) = event.delta {
+                        let event = ResponseEvent::ReasoningSummaryDelta(delta);
+                        if tx_event.send(Ok(event)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                "response.created" => {
+                    if event.response.is_some() {
+                        let _ = tx_event.send(Ok(ResponseEvent::Created {})).await;
+                    }
+                }
+                "response.failed" => {
+                    if let Some(resp_val) = event.response {
+                        let error = resp_val
+                            .get("error")
+                            .and_then(|v| v.get("message"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("response.failed event received");
+
                         let _ = tx_event
-                            .send(Err(CodexErr::Stream(
-                                "stream closed before response.completed".into(),
-                            )))
+                            .send(Err(CodexErr::Stream(error.to_string())))
                             .await;
                     }
                 }
-                return;
-            }
-            Err(_) => {
-                let _ = tx_event
-                    .send(Err(CodexErr::Stream("idle timeout waiting for SSE".into())))
-                    .await;
-                return;
-            }
-        };
-
-        let event: SseEvent = match serde_json::from_str(&sse.data) {
-            Ok(event) => event,
-            Err(e) => {
-                debug!("Failed to parse SSE event: {e}, data: {}", &sse.data);
-                continue;
-            }
-        };
-
-        trace!(?event, "SSE event");
-        match event.kind.as_str() {
-            // Individual output item finalised. Forward immediately so the
-            // rest of the agent can stream assistant text/functions *live*
-            // instead of waiting for the final `response.completed` envelope.
-            //
-            // IMPORTANT: We used to ignore these events and forward the
-            // duplicated `output` array embedded in the `response.completed`
-            // payload.  That produced two concrete issues:
-            //   1. No real‑time streaming – the user only saw output after the
-            //      entire turn had finished, which broke the "typing" UX and
-            //      made long‑running turns look stalled.
-            //   2. Duplicate `function_call_output` items – both the
-            //      individual *and* the completed array were forwarded, which
-            //      confused the backend and triggered 400
-            //      "previous_response_not_found" errors because the duplicated
-            //      IDs did not match the incremental turn chain.
-            //
-            // The fix is to forward the incremental events *as they come* and
-            // drop the duplicated list inside `response.completed`.
-            "response.output_item.done" => {
-                let Some(item_val) = event.item else { continue };
-                let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) else {
-                    debug!("failed to parse ResponseItem from output_item.done");
-                    continue;
-                };
-
-                let event = ResponseEvent::OutputItemDone(item);
-                if tx_event.send(Ok(event)).await.is_err() {
-                    return;
-                }
-            }
-            "response.output_text.delta" => {
-                if let Some(delta) = event.delta {
-                    let event = ResponseEvent::OutputTextDelta(delta);
-                    if tx_event.send(Ok(event)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            "response.reasoning_summary_text.delta" => {
-                if let Some(delta) = event.delta {
-                    let event = ResponseEvent::ReasoningSummaryDelta(delta);
-                    if tx_event.send(Ok(event)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            "response.created" => {
-                if event.response.is_some() {
-                    let _ = tx_event.send(Ok(ResponseEvent::Created {})).await;
-                }
-            }
-            // Final response completed – includes array of output items & id
-            "response.completed" => {
-                if let Some(resp_val) = event.response {
-                    match serde_json::from_value::<ResponseCompleted>(resp_val) {
-                        Ok(r) => {
-                            response_completed = Some(r);
-                        }
-                        Err(e) => {
-                            debug!("failed to parse ResponseCompleted: {e}");
-                            continue;
-                        }
+                "response.completed" => {
+                    if let Some(resp_val) = event.response {
+                        match serde_json::from_value::<ResponseCompleted>(resp_val) {
+                            Ok(r) => {
+                                response_completed = Some(r);
+                            }
+                            Err(e) => {
+                                tracing::debug!("failed to parse ResponseCompleted: {e}");
+                                continue;
+                            }
+                        };
                     };
-                };
+                }
+                "response.content_part.done"
+                | "response.function_call_arguments.delta"
+                | "response.in_progress"
+                | "response.output_item.added"
+                | "response.output_text.done"
+                | "response.reasoning_summary_part.added"
+                | "response.reasoning_summary_text.done" => {}
+                other => {
+                    tracing::debug!("sse event: {}", other);
+                }
             }
-            "response.content_part.done"
-            | "response.function_call_arguments.delta"
-            | "response.in_progress"
-            | "response.output_item.added"
-            | "response.output_text.done"
-            | "response.reasoning_summary_part.added"
-            | "response.reasoning_summary_text.done" => {
-                // Currently, we ignore these events, but we handle them
-                // separately to skip the logging message in the `other` case.
-            }
-            other => debug!(other, "sse event"),
         }
     }
 }
 
-/// used in tests to stream from a text SSE file
-async fn stream_from_fixture(
-    path: impl AsRef<Path>,
-    provider: ModelProviderInfo,
-) -> Result<ResponseStream> {
-    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
-    let f = std::fs::File::open(path.as_ref())?;
-    let lines = std::io::BufReader::new(f).lines();
 
-    // insert \n\n after each line for proper SSE parsing
-    let mut content = String::new();
-    for line in lines {
-        content.push_str(&line?);
-        content.push_str("\n\n");
+impl ModelClient {
+    /// used in tests to stream from a text SSE file
+    async fn stream_from_fixture_local(
+        &self,
+        path: impl AsRef<Path>,
+        provider: ModelProviderInfo,
+    ) -> Result<ResponseStream> {
+        let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+        let f = std::fs::File::open(path.as_ref())?;
+        let reader = std::io::BufReader::new(f);
+        let mut content = String::new();
+        for line in reader.lines() {
+            let line = line?;
+            content.push_str(&line);
+            content.push_str("\n\n");
+        }
+
+        let rdr = std::io::Cursor::new(content);
+        let stream = ReaderStream::new(rdr).map_err(CodexErr::Io);
+        tokio::spawn(sse_shared::process_sse(
+            stream,
+            tx_event,
+            provider.stream_idle_timeout(),
+        ));
+        Ok(ResponseStream { rx_event })
     }
-
-    let rdr = std::io::Cursor::new(content);
-    let stream = ReaderStream::new(rdr).map_err(CodexErr::Io);
-    tokio::spawn(process_sse(
-        stream,
-        tx_event,
-        provider.stream_idle_timeout(),
-    ));
-    Ok(ResponseStream { rx_event })
 }
 
 #[cfg(test)]
@@ -483,7 +576,7 @@ mod tests {
         let reader = builder.build();
         let stream = ReaderStream::new(reader).map_err(CodexErr::Io);
         let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent>>(16);
-        tokio::spawn(process_sse(stream, tx, provider.stream_idle_timeout()));
+        tokio::spawn(Self::process_sse_local(stream, tx, provider.stream_idle_timeout()));
 
         let mut events = Vec::new();
         while let Some(ev) = rx.recv().await {
@@ -513,7 +606,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent>>(8);
         let stream = ReaderStream::new(std::io::Cursor::new(body)).map_err(CodexErr::Io);
-        tokio::spawn(process_sse(stream, tx, provider.stream_idle_timeout()));
+        tokio::spawn(Self::process_sse_local(stream, tx, provider.stream_idle_timeout()));
 
         let mut out = Vec::new();
         while let Some(ev) = rx.recv().await {
@@ -560,7 +653,7 @@ mod tests {
 
         let provider = ModelProviderInfo {
             name: "test".to_string(),
-            base_url: "https://test.com".to_string(),
+            base_url: Some("https://test.com".to_string()),
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             wire_api: WireApi::Responses,
@@ -570,6 +663,7 @@ mod tests {
             request_max_retries: Some(0),
             stream_max_retries: Some(0),
             stream_idle_timeout_ms: Some(1000),
+            requires_auth: false,
         };
 
         let events = collect_events(
@@ -619,7 +713,7 @@ mod tests {
         let sse1 = format!("event: response.output_item.done\ndata: {item1}\n\n");
         let provider = ModelProviderInfo {
             name: "test".to_string(),
-            base_url: "https://test.com".to_string(),
+            base_url: Some("https://test.com".to_string()),
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             wire_api: WireApi::Responses,
@@ -629,6 +723,7 @@ mod tests {
             request_max_retries: Some(0),
             stream_max_retries: Some(0),
             stream_idle_timeout_ms: Some(1000),
+            requires_auth: false,
         };
 
         let events = collect_events(&[sse1.as_bytes()], provider).await;
@@ -721,7 +816,7 @@ mod tests {
 
             let provider = ModelProviderInfo {
                 name: "test".to_string(),
-                base_url: "https://test.com".to_string(),
+                base_url: Some("https://test.com".to_string()),
                 env_key: Some("TEST_API_KEY".to_string()),
                 env_key_instructions: None,
                 wire_api: WireApi::Responses,
@@ -731,6 +826,7 @@ mod tests {
                 request_max_retries: Some(0),
                 stream_max_retries: Some(0),
                 stream_idle_timeout_ms: Some(1000),
+                requires_auth: false,
             };
 
             let out = run_sse(evs, provider).await;
@@ -742,4 +838,111 @@ mod tests {
             );
         }
     }
+}
+
+/// Process a complete JSON response from Azure OpenAI and convert it to events
+async fn process_complete_json_response(
+    response_text: String,
+    tx_event: mpsc::Sender<Result<ResponseEvent>>,
+) -> Result<()> {
+    use serde_json::Value;
+    use crate::protocol::TokenUsage;
+
+    trace!("=== Complete JSON Response ===");
+    trace!("{}", response_text);
+    trace!("==============================");
+
+    // Parse the JSON response
+    let response: Value = serde_json::from_str(&response_text)
+        .map_err(|e| CodexErr::Stream(format!("Failed to parse JSON response: {}", e)))?;
+
+    // Send created event
+    let _ = tx_event.send(Ok(ResponseEvent::Created)).await;
+
+    // Extract the text content from the response and create proper ResponseItem
+    if let Some(output) = response.get("output").and_then(|o| o.as_array()) {
+        trace!("Found output array with {} items", output.len());
+
+        let mut collected_text = String::new();
+
+        for item in output {
+            if item.get("type").and_then(|t| t.as_str()) == Some("message") {
+                if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                    for content_item in content {
+                        if content_item.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                            if let Some(text) = content_item.get("text").and_then(|t| t.as_str()) {
+                                collected_text.push_str(text);
+
+                                // Send the text as a delta event for streaming display
+                                let event = ResponseEvent::OutputTextDelta(text.to_string());
+                                if tx_event.send(Ok(event)).await.is_err() {
+                                    return Ok(()); // Receiver dropped
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create a complete ResponseItem::Message for conversation history
+        if !collected_text.is_empty() {
+            use crate::models::{ResponseItem, ContentItem};
+
+            let message_item = ResponseItem::Message {
+                id: response.get("id")
+                    .and_then(|id| id.as_str())
+                    .map(|s| s.to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText { text: collected_text }],
+            };
+
+            // Send the complete message as OutputItemDone for conversation history
+            let event = ResponseEvent::OutputItemDone(message_item);
+            if tx_event.send(Ok(event)).await.is_err() {
+                return Ok(()); // Receiver dropped
+            }
+        }
+    } else {
+        trace!("No output array found in response");
+    }
+
+    // Extract token usage
+    let token_usage = response.get("usage").and_then(|usage| {
+        let input_tokens = usage.get("input_tokens")?.as_u64()?;
+        let output_tokens = usage.get("output_tokens")?.as_u64()?;
+        let total_tokens = usage.get("total_tokens")?.as_u64()?;
+
+        // Extract cached tokens if available
+        let cached_input_tokens = usage.get("input_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(|v| v.as_u64());
+
+        // Extract reasoning tokens if available
+        let reasoning_output_tokens = usage.get("output_tokens_details")
+            .and_then(|details| details.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64());
+
+        Some(TokenUsage {
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_output_tokens,
+            total_tokens,
+        })
+    });
+
+    // Send completion event
+    let response_id = response.get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let completion_event = ResponseEvent::Completed {
+        response_id,
+        token_usage,
+    };
+
+    let _ = tx_event.send(Ok(completion_event)).await;
+    Ok(())
 }

@@ -1,9 +1,10 @@
 use anyhow::Result;
-use std::path::{Path, PathBuf};
-use tokio::fs;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use regex::Regex;
+use std::path::Path;
+use std::path::PathBuf;
+use tokio::fs;
 
 use crate::types::*;
 
@@ -37,16 +38,14 @@ impl CodeParser {
     }
 
     /// Discover all code files in a directory
-    pub async fn discover_files(&self,
-        root_path: &Path,
-    ) -> Result<Vec<PathBuf>> {
+    pub async fn discover_files(&self, root_path: &Path) -> Result<Vec<PathBuf>> {
         let walker = WalkBuilder::new(root_path)
             .add_custom_ignore_filename(".ragignore")
             .git_ignore(true)
             .build();
 
         let mut files = Vec::new();
-        
+
         for entry in walker {
             if let Ok(entry) = entry {
                 let path = entry.path();
@@ -63,22 +62,17 @@ impl CodeParser {
     }
 
     /// Parse a single file and extract code information
-    pub async fn parse_file(&self,
-        file_path: &Path,
-    ) -> Result<CodeUnit> {
+    pub async fn parse_file(&self, file_path: &Path) -> Result<CodeUnit> {
         let content = fs::read_to_string(file_path).await?;
-        let language = self.detect_language(file_path);
-        
+        let _language = self.detect_language(file_path);
+
         let code_unit = self.parser.parse(&content, file_path)?;
 
         Ok(code_unit)
     }
 
     /// Parse multiple files in parallel
-    pub async fn parse_files_parallel(
-        &self,
-        files: &[PathBuf],
-    ) -> Result<Vec<CodeUnit>> {
+    pub async fn parse_files_parallel(&self, files: &[PathBuf]) -> Result<Vec<CodeUnit>> {
         let results: Result<Vec<_>> = files
             .par_iter()
             .map(|file| {
@@ -91,9 +85,7 @@ impl CodeParser {
     }
 
     /// Detect language based on file extension
-    fn detect_language(&self,
-        path: &Path,
-    ) -> Language {
+    fn detect_language(&self, path: &Path) -> Language {
         match path.extension().and_then(|s| s.to_str()) {
             Some("rs") => Language::Rust,
             Some("kt") => Language::Kotlin,
@@ -105,9 +97,7 @@ impl CodeParser {
     }
 
     /// Check if file should be included based on patterns
-    fn should_include_file(&self,
-        path: &Path,
-    ) -> bool {
+    fn should_include_file(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy();
 
         // Check exclude patterns
@@ -136,6 +126,7 @@ impl CodeParser {
     }
 
     /// Generic parser for unsupported languages
+    #[allow(dead_code)]
     fn parse_generic(
         &self,
         content: &str,
@@ -164,9 +155,8 @@ impl CodeParser {
         })
     }
 
-    fn extract_imports_generic(&self,
-        content: &str,
-    ) -> Vec<String> {
+    #[allow(dead_code)]
+    fn extract_imports_generic(&self, content: &str) -> Vec<String> {
         let re = regex::Regex::new(r"(?m)^(use|import|package)\s+([\w:]+)").unwrap();
         re.captures_iter(content)
             .filter_map(|cap| cap.get(2))
@@ -174,14 +164,13 @@ impl CodeParser {
             .collect()
     }
 
-    fn extract_functions_generic(
-        &self,
-        content: &str,
-    ) -> Vec<FunctionInfo> {
+    #[allow(dead_code)]
+    fn extract_functions_generic(&self, content: &str) -> Vec<FunctionInfo> {
         let re = regex::Regex::new(
-            r"(?m)(?:pub\s+)?(?:fn|func|fun)\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*(\w+))?"
-        ).unwrap();
-        
+            r"(?m)(?:pub\s+)?(?:fn|func|fun)\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*(\w+))?",
+        )
+        .unwrap();
+
         re.captures_iter(content)
             .map(|cap| FunctionInfo {
                 name: cap[1].to_string(),
@@ -194,14 +183,10 @@ impl CodeParser {
             .collect()
     }
 
-    fn extract_structs_generic(
-        &self,
-        content: &str,
-    ) -> Vec<StructInfo> {
-        let re = regex::Regex::new(
-            r"(?m)(?:pub\s+)?(?:struct|class|interface)\s+(\w+)"
-        ).unwrap();
-        
+    #[allow(dead_code)]
+    fn extract_structs_generic(&self, content: &str) -> Vec<StructInfo> {
+        let re = regex::Regex::new(r"(?m)(?:pub\s+)?(?:struct|class|interface)\s+(\w+)").unwrap();
+
         re.captures_iter(content)
             .map(|cap| StructInfo {
                 name: cap[1].to_string(),
@@ -216,10 +201,10 @@ impl CodeParser {
             .collect()
     }
 
-    fn parse_parameters_generic(&self,
-        params_str: &str,
-    ) -> Vec<ParameterInfo> {
-        params_str.split(',')
+    #[allow(dead_code)]
+    fn parse_parameters_generic(&self, params_str: &str) -> Vec<ParameterInfo> {
+        params_str
+            .split(',')
             .map(|param| {
                 let parts: Vec<&str> = param.split(':').collect();
                 if parts.len() == 2 {
@@ -249,20 +234,20 @@ impl Default for CodeParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-use tempfile::tempdir;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_discover_files() {
         let dir = tempdir().unwrap();
         let rust_file = dir.path().join("test.rs");
         let kt_file = dir.path().join("test.kt");
-        
+
         tokio::fs::write(&rust_file, "fn main() {}").await.unwrap();
         tokio::fs::write(&kt_file, "fun main() {}").await.unwrap();
-        
+
         let parser = CodeParser::new();
         let files = parser.discover_files(dir.path()).await.unwrap();
-        
+
         assert_eq!(files.len(), 2);
         assert!(files.contains(&rust_file));
         assert!(files.contains(&kt_file));
@@ -271,10 +256,19 @@ use tempfile::tempdir;
     #[tokio::test]
     async fn test_detect_language() {
         let parser = CodeParser::new();
-        
+
         assert_eq!(parser.detect_language(Path::new("test.rs")), Language::Rust);
-        assert_eq!(parser.detect_language(Path::new("test.kt")), Language::Kotlin);
-        assert_eq!(parser.detect_language(Path::new("test.java")), Language::Java);
-        assert_eq!(parser.detect_language(Path::new("test.py")), Language::Other("py".to_string()));
+        assert_eq!(
+            parser.detect_language(Path::new("test.kt")),
+            Language::Kotlin
+        );
+        assert_eq!(
+            parser.detect_language(Path::new("test.java")),
+            Language::Java
+        );
+        assert_eq!(
+            parser.detect_language(Path::new("test.py")),
+            Language::Other("py".to_string())
+        );
     }
 }
