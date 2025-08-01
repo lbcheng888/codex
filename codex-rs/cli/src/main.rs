@@ -5,8 +5,7 @@ use clap_complete::generate;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
-use codex_cli::LandlockCommand;
-use codex_cli::SeatbeltCommand;
+// Sandbox command imports removed
 use codex_cli::login::run_login_status;
 use codex_cli::login::run_login_with_chatgpt;
 use codex_cli::proto;
@@ -88,14 +87,14 @@ struct DebugArgs {
     cmd: DebugCommand,
 }
 
+/// Placeholder for legacy debug subcommands that were removed alongside the
+/// obsolete sandbox implementation.  The enum purposefully has **no** public
+/// variants – attempting to use `codex debug` will produce a helpful error
+/// message, but keeping the type around avoids a breaking change at the API
+/// level and warden warnings for existing scripts that might still invoke the
+/// command out of habit.
 #[derive(Debug, clap::Subcommand)]
-enum DebugCommand {
-    /// Run a command under Seatbelt (macOS only).
-    Seatbelt(SeatbeltCommand),
-
-    /// Run a command under Landlock+seccomp (Linux only).
-    Landlock(LandlockCommand),
-}
+enum DebugCommand {}
 
 #[derive(Debug, Parser)]
 struct LoginCommand {
@@ -154,23 +153,19 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         Some(Subcommand::Completion(completion_cli)) => {
             print_completion(completion_cli);
         }
-        Some(Subcommand::Debug(debug_args)) => match debug_args.cmd {
-            DebugCommand::Seatbelt(mut seatbelt_cli) => {
-                prepend_config_flags(&mut seatbelt_cli.config_overrides, cli.config_overrides);
-                // Seatbelt functionality has been removed
-            }
-            DebugCommand::Landlock(mut landlock_cli) => {
-                prepend_config_flags(&mut landlock_cli.config_overrides, cli.config_overrides);
-                // Landlock functionality has been removed
-            }
-        },
+        Some(Subcommand::Debug(_debug_args)) => {
+            // Debug functionality completely removed
+            eprintln!("Debug commands have been removed - sandbox functionality eliminated");
+        }
         Some(Subcommand::Apply(mut apply_cli)) => {
             prepend_config_flags(&mut apply_cli.config_overrides, cli.config_overrides);
             run_apply_command(apply_cli, None).await?;
         }
         Some(Subcommand::Search(search_cli)) => {
             use codex_common::json_utils;
-            use codex_file_search::{FileMatch, Reporter, run_main};
+            use codex_file_search::FileMatch;
+            use codex_file_search::Reporter;
+            use codex_file_search::run_main;
             use serde_json::json;
             use std::io::IsTerminal;
 

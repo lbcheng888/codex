@@ -3,8 +3,7 @@ use crate::config_types::History;
 use crate::config_types::McpServerConfig;
 use crate::config_types::ReasoningEffort;
 use crate::config_types::ReasoningSummary;
-use crate::config_types::SandboxMode;
-use crate::config_types::SandboxWorkplaceWrite;
+// Sandbox imports removed
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::config_types::ShellEnvironmentPolicyToml;
 use crate::config_types::Tui;
@@ -14,7 +13,7 @@ use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;
 use crate::openai_model_info::get_model_info;
 use crate::protocol::AskForApproval;
-use crate::protocol::SandboxPolicy;
+// Sandbox imports removed
 use dirs::home_dir;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -267,12 +266,7 @@ pub struct ConfigToml {
     /// Default approval policy for executing commands.
     pub approval_policy: Option<AskForApproval>,
 
-    /// Sandbox mode configuration (removed functionality, kept for compatibility)
-    pub sandbox_mode: Option<SandboxMode>,
-
-    /// Sandbox workspace write configuration (removed functionality, kept for compatibility)
-    pub sandbox_workspace_write: Option<SandboxWorkplaceWrite>,
-
+    // Sandbox configuration completely removed
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
 
@@ -338,24 +332,7 @@ pub struct ConfigToml {
 }
 
 impl ConfigToml {
-    /// Derive the effective sandbox policy from the configuration.
-    #[allow(dead_code)]
-    fn derive_sandbox_policy(&self, sandbox_mode_override: Option<SandboxMode>) -> SandboxPolicy {
-        let resolved_sandbox_mode = sandbox_mode_override
-            .or(self.sandbox_mode)
-            .unwrap_or_default();
-        match resolved_sandbox_mode {
-            SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
-            SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
-                Some(s) => SandboxPolicy::WorkspaceWrite {
-                    writable_roots: s.writable_roots.iter().map(PathBuf::from).collect(),
-                    network_access: s.network_access,
-                },
-                None => SandboxPolicy::new_workspace_write_policy(),
-            },
-            SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
-        }
-    }
+    // Sandbox functionality completely removed
 }
 
 /// Optional overrides for user configuration (e.g., from CLI flags).

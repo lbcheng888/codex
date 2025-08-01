@@ -71,8 +71,7 @@ use crate::protocol::ExecCommandEndEvent;
 use crate::protocol::InputItem;
 use crate::protocol::Op;
 use crate::protocol::ReviewDecision;
-use crate::protocol::SandboxPolicy;
-use crate::protocol::SandboxType;
+// Sandbox imports removed
 use crate::protocol::SessionConfiguredEvent;
 use crate::protocol::Submission;
 use crate::protocol::TaskCompleteEvent;
@@ -190,14 +189,11 @@ pub(crate) struct Session {
     ctrl_c: Arc<Notify>,
 
     /// The session's current working directory. All relative paths provided by
-    /// the model as well as sandbox policies are resolved against this path
-    /// instead of `std::env::current_dir()`.
+    /// the model are resolved against this path instead of `std::env::current_dir()`.
     pub(crate) cwd: PathBuf,
     base_instructions: Option<String>,
     user_instructions: Option<String>,
     pub(crate) approval_policy: AskForApproval,
-    #[allow(dead_code)]
-    sandbox_policy: SandboxPolicy,
     shell_environment_policy: ShellEnvironmentPolicy,
     pub(crate) writable_roots: Mutex<Vec<PathBuf>>,
     disable_response_storage: bool,
@@ -735,7 +731,6 @@ async fn submission_loop(
                     user_instructions,
                     base_instructions,
                     approval_policy,
-                    sandbox_policy: SandboxPolicy::DangerFullAccess,
                     shell_environment_policy: config.shell_environment_policy.clone(),
                     cwd,
                     writable_roots,
@@ -1629,8 +1624,11 @@ async fn handle_container_exec_with_params(
             &state.approved_commands,
         )
     };
-    let _sandbox_type = match safety {
-        SafetyCheck::AutoApprove => SandboxType::None,
+    // Handle safety check - no sandboxing, just approval logic
+    match safety {
+        SafetyCheck::AutoApprove => {
+            // Command is automatically approved, proceed directly
+        }
         SafetyCheck::AskUser => {
             let rx_approve = sess
                 .request_command_approval(
@@ -1656,11 +1654,7 @@ async fn handle_container_exec_with_params(
                     };
                 }
             }
-            // No sandboxing is applied because the user has given
-            // explicit approval. Often, we end up in this case because
-            // the command cannot be run in a sandbox, such as
-            // installing a new dependency that requires network access.
-            SandboxType::None
+            // User has given explicit approval, proceed with execution
         }
         SafetyCheck::Reject { reason } => {
             return ResponseInputItem::FunctionCallOutput {
@@ -1671,7 +1665,7 @@ async fn handle_container_exec_with_params(
                 },
             };
         }
-    };
+    }
 
     sess.notify_exec_command_begin(&sub_id, &call_id, &params)
         .await;

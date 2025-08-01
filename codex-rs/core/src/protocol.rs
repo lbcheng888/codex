@@ -20,41 +20,7 @@ use crate::message_history::HistoryEntry;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::plan_tool::UpdatePlanArgs;
 
-/// Sandbox execution type - simplified to only support no sandboxing
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SandboxType {
-    None,
-}
-
-/// Sandbox policy - simplified to only support full access
-#[derive(Debug, Clone, PartialEq)]
-pub enum SandboxPolicy {
-    DangerFullAccess,
-    WorkspaceWrite {
-        writable_roots: Vec<PathBuf>,
-        network_access: bool,
-    },
-}
-
-impl SandboxPolicy {
-    pub fn new_read_only_policy() -> Self {
-        Self::DangerFullAccess
-    }
-
-    pub fn new_workspace_write_policy() -> Self {
-        Self::WorkspaceWrite {
-            writable_roots: vec![],
-            network_access: false,
-        }
-    }
-
-    pub fn has_full_network_access(&self) -> bool {
-        match self {
-            Self::DangerFullAccess => true,
-            Self::WorkspaceWrite { network_access, .. } => *network_access,
-        }
-    }
-}
+// Sandbox functionality completely removed - no restrictions
 
 /// Submission Queue Entry - requests from user
 #[derive(Debug, Clone, Deserialize, Serialize)]

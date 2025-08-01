@@ -10,6 +10,36 @@ use wildmatch::WildMatchPattern;
 use serde::Deserialize;
 use serde::Serialize;
 
+////////////////////////////////////////////////////////////////////////////////
+// SandboxMode (stub)
+//
+// Historically, Codex supported multiple sandbox isolation levels when
+// executing shell commands or writing to the filesystem.  Those features have
+// since been removed from the core implementation, but a handful of
+// downstream crates still reference the old `SandboxMode` enum for
+// (de)serialisation and display purposes.  The variants are kept here as a
+// *thin shim* so that the public API remains source-compatible while the
+// sandbox code is gradually deleted.
+//
+// NOTE: Only the variants that are still referenced in the code base are
+// preserved.  If additional variants are required in the future, they can be
+// added without breaking existing serialised data by assigning them explicit
+// `serde` names.
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    /// Allows write access within the current workspace but blocks access to
+    /// parent directories.  Retained for backwards-compatibility with older
+    /// clients.
+    WorkspaceWrite,
+
+    /// Disables all sandbox restrictions.  This is the default/fallback mode
+    /// now that the dedicated sandbox implementation has been removed.
+    DangerFullAccess,
+}
+
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct McpServerConfig {
     pub command: String,
@@ -93,33 +123,7 @@ pub struct Tui {
     pub disable_alternate_screen: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum SandboxMode {
-    #[serde(rename = "read-only")]
-    #[default]
-    ReadOnly,
-
-    #[serde(rename = "workspace-write")]
-    WorkspaceWrite,
-
-    #[serde(rename = "danger-full-access")]
-    DangerFullAccess,
-}
-
-#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct SandboxWorkplaceWrite {
-    #[serde(default)]
-    pub disable_alternate_screen: bool,
-
-    /// Writable root directories (removed functionality, kept for compatibility)
-    #[serde(default)]
-    pub writable_roots: Vec<String>,
-
-    /// Network access flag (removed functionality, kept for compatibility)
-    #[serde(default)]
-    pub network_access: bool,
-}
+// Sandbox configuration types completely removed
 
 // Manual `Default` implementation so we can enable a sensible default for
 // `disable_alternate_screen`.  Leaving the decision to the plain `derive`

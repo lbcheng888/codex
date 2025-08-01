@@ -37,10 +37,7 @@ pub struct CodexToolCallParam {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_policy: Option<CodexToolCallApprovalPolicy>,
 
-    /// Sandbox mode: `read-only`, `workspace-write`, or `danger-full-access`.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "sandbox")]
-    pub _sandbox: Option<CodexToolCallSandboxMode>,
-
+    // Sandbox configuration removed
     /// Individual config settings that will override what is in
     /// CODEX_HOME/config.toml.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,17 +72,7 @@ impl From<CodexToolCallApprovalPolicy> for AskForApproval {
     }
 }
 
-/// Custom enum mirroring [`SandboxMode`] from config_types.rs, but with
-/// `JsonSchema` support.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum CodexToolCallSandboxMode {
-    ReadOnly,
-    WorkspaceWrite,
-    DangerFullAccess,
-}
-
-// Sandbox modes are no longer supported - all functionality removed
+// Sandbox functionality completely removed
 
 /// Builds a `Tool` definition (JSON schema etc.) for the Codex tool-call.
 pub(crate) fn create_tool_for_codex_tool_call_param() -> Tool {
@@ -132,7 +119,6 @@ impl CodexToolCallParam {
             profile,
             cwd,
             approval_policy,
-            _sandbox: _,
             config: cli_overrides,
             base_instructions,
             include_plan_tool,
