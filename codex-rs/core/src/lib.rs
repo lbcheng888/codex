@@ -48,5 +48,22 @@ pub mod spawn;
 pub mod turn_diff_tracker;
 mod user_notification;
 pub mod util;
+pub mod audit;
+pub mod external_decider;
 pub use apply_patch::CODEX_APPLY_PATCH_ARG1;
 pub use safety::get_platform_sandbox;
+/// 统一错误别名，供外部稳定引用
+pub use crate::error::CodexErr as CodexError;
+
+// 稳定接口层（供适配层实现）
+pub mod interfaces;
+/// 稳定核心类型（流式、取消、编辑、诊断等）
+pub mod types;
+/// 通用重试/恢复策略实现
+pub mod retry;
+
+/// Serena 可选接线工厂
+pub mod serena_wiring;
+
+// Serena in-process adapter
+mod serena_inprocess;

@@ -218,7 +218,7 @@ pub async fn run_main(
 
         eprintln!(
             "{} {current_version} -> {latest_version}.",
-            "✨⬆️ Update available!".bold().cyan()
+            "Update available!".bold().cyan()
         );
 
         if managed_by_npm {

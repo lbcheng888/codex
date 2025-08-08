@@ -2,6 +2,8 @@ mod cli;
 mod event_processor;
 mod event_processor_with_human_output;
 mod event_processor_with_json_output;
+mod markdown;
+mod stream_markdown;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -110,7 +112,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         .try_init();
 
     let sandbox_mode = if full_auto {
-        Some(SandboxMode::WorkspaceWrite)
+        // With sandbox removed, ensure full_auto runs without sandboxing.
+        Some(SandboxMode::DangerFullAccess)
     } else if dangerously_bypass_approvals_and_sandbox {
         Some(SandboxMode::DangerFullAccess)
     } else {

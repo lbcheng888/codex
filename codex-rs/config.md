@@ -253,17 +253,14 @@ model_supports_reasoning_summaries = true
 
 ## sandbox_mode
 
-Codex executes model-generated shell commands inside an OS-level sandbox.
-
-In most cases you can pick the desired behaviour with a single option:
+Codex 执行模型生成的 shell 命令时支持多种沙箱策略。现在默认已取消沙箱（`danger-full-access`）。你可以按需选择：
 
 ```toml
-# same as `--sandbox read-only`
-sandbox_mode = "read-only"
+# same as `--sandbox danger-full-access`
+sandbox_mode = "danger-full-access"
 ```
 
-The default policy is `read-only`, which means commands can read any file on
-disk, but attempts to write a file or access the network will be blocked.
+默认策略为 `danger-full-access`，即不做读写或网络限制；请仅在受控环境（如容器或隔离沙箱）中使用。
 
 A more relaxed policy is `workspace-write`. When specified, the current working directory for the Codex task will be writable (as well as `$TMPDIR` on macOS). Note that the CLI defaults to using the directory where it was spawned as `cwd`, though this can be overridden using `--cwd/-C`.
 
@@ -286,16 +283,14 @@ exclude_slash_tmp = false
 network_access = false
 ```
 
-To disable sandboxing altogether, specify `danger-full-access` like so:
+要使用最严格的只读沙箱，请设置：
 
 ```toml
-# same as `--sandbox danger-full-access`
-sandbox_mode = "danger-full-access"
+# same as `--sandbox read-only`
+sandbox_mode = "read-only"
 ```
 
-This is reasonable to use if Codex is running in an environment that provides its own sandboxing (such as a Docker container) such that further sandboxing is unnecessary.
-
-Though using this option may also be necessary if you try to use Codex in environments where its native sandboxing mechanisms are unsupported, such as older Linux kernels or on Windows.
+如果你在本地不受控环境运行，建议优先选择 `read-only` 或 `workspace-write`，并在需要更高权限时再手动切换为 `danger-full-access`。
 
 ## mcp_servers
 

@@ -11,33 +11,42 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
+sha2 = "0.10"
+thiserror = "1"
 anyhow = "1"
+once_cell = "1"
+async-trait = "0.1"
+parking_lot = "0.12"
+mcp_types = "0.1"
+codex_mcp_client = "0.1"
+# 可选 Candle/Metal 依赖，仅在 external_decider_metal 特性开启时编译
+candle-core = { version = "0.7", optional = true, default-features = false, features = ["metal"] }
+safetensors = { version = "0.4", optional = true }
+tokenizers = { version = "0.15", optional = true }
 async-channel = "2.3.1"
 base64 = "0.22"
 bytes = "1.10.1"
-chrono = { version = "0.4", features = ["serde"] }
 codex-apply-patch = { path = "../apply-patch" }
 codex-login = { path = "../login" }
-codex-mcp-client = { path = "../mcp-client" }
 dirs = "6"
 env-flags = "0.1.1"
 eventsource-stream = "0.2.3"
 fs2 = "0.4.3"
 futures = "0.3"
 libc = "0.2.174"
-mcp-types = { path = "../mcp-types" }
 mime_guess = "2.0"
 rand = "0.9"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 serde_bytes = "0.11"
 sha1 = "0.10.6"
 shlex = "1.3.0"
 similar = "2.7.0"
 strum_macros = "0.27.2"
 tempfile = "3"
-thiserror = "2.0.12"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 tokio = { version = "1", features = [
     "io-std",
@@ -52,10 +61,19 @@ toml_edit = "0.23.3"
 tracing = { version = "0.1.41", features = ["log"] }
 tree-sitter = "0.25.8"
 tree-sitter-bash = "0.25.0"
-uuid = { version = "1", features = ["serde", "v4"] }
 whoami = "1.6.0"
 wildmatch = "2.4.0"
 
+# Serena in-process integration
+serena-core = { path = "../serena-rust/serena-core" }
+serena-tools = { path = "../serena-rust/serena-tools" }
+
+
+[features]
+# 预留开关（当前未内联依赖适配层）
+serena_native = []
+# 可选：启用本地外部决策器的 Candle/Metal 依赖（占位加载，不做真实推理）。
+external_decider_metal = ["dep:candle-core", "dep:safetensors", "dep:tokenizers"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.1"
@@ -70,12 +88,12 @@ openssl-sys = { version = "*", features = ["vendored"] }
 openssl-sys = { version = "*", features = ["vendored"] }
 
 [dev-dependencies]
+tempfile = "3"
 assert_cmd = "2"
 core_test_support = { path = "tests/common" }
 maplit = "1.0.2"
 predicates = "3"
 pretty_assertions = "1.4.1"
-tempfile = "3"
 tokio-test = "0.4"
 walkdir = "2.5.0"
 wiremock = "0.6"

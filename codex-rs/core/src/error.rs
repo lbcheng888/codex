@@ -1,10 +1,52 @@
 use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::io;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::task::JoinError;
 
 pub type Result<T> = std::result::Result<T, CodexErr>;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CodexErrorCode {
+    // Codex core
+    StreamDisconnected,
+    Timeout,
+    SpawnFailed,
+    Interrupted,
+    HttpUnexpectedStatus,
+    UsageLimitReached,
+    UsageNotIncluded,
+    InternalServerError,
+    RetryLimit,
+    InternalAgentDied,
+    // Sandbox
+    SandboxDenied,
+    SandboxTimeout,
+    SandboxSignal,
+    SandboxLandlockRestrict,
+    // Serena mapped
+    SerenaConfig,
+    SerenaIo,
+    SerenaProtocol,
+    SerenaTool,
+    SerenaValidation,
+    SerenaNotFound,
+    SerenaLanguageServer,
+    SerenaTimeout,
+    SerenaSerialization,
+    SerenaAuthentication,
+    SerenaPermission,
+    SerenaInternal,
+    // External passthrough
+    Io,
+    Reqwest,
+    Json,
+    EnvVar,
+    Unknown,
+}
 
 #[derive(Error, Debug)]
 pub enum SandboxErr {
@@ -113,6 +155,10 @@ pub enum CodexErr {
 
     #[error("{0}")]
     EnvVar(EnvVarError),
+
+    /// Serena 核心错误映射（标准化）
+    #[error("serena core error: {0}")]
+    Serena(#[from] serena_core::error::CoreError),
 }
 
 #[derive(Debug)]
@@ -141,6 +187,104 @@ impl CodexErr {
     /// `anyhow::Error::downcast_ref` but works directly on our concrete enum.
     pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
         (self as &dyn std::any::Any).downcast_ref::<T>()
+    }
+
+    /// 标准化错误码
+    pub fn code(&self) -> CodexErrorCode {
+        match self {
+            CodexErr::Stream(_) => CodexErrorCode::StreamDisconnected,
+            CodexErr::Timeout => CodexErrorCode::Timeout,
+            CodexErr::Spawn => CodexErrorCode::SpawnFailed,
+            CodexErr::Interrupted => CodexErrorCode::Interrupted,
+            CodexErr::UnexpectedStatus(_, _) => CodexErrorCode::HttpUnexpectedStatus,
+            CodexErr::UsageLimitReached => CodexErrorCode::UsageLimitReached,
+            CodexErr::UsageNotIncluded => CodexErrorCode::UsageNotIncluded,
+            CodexErr::InternalServerError => CodexErrorCode::InternalServerError,
+            CodexErr::RetryLimit(_) => CodexErrorCode::RetryLimit,
+            CodexErr::InternalAgentDied => CodexErrorCode::InternalAgentDied,
+            CodexErr::Sandbox(SandboxErr::Denied(_, _, _)) => CodexErrorCode::SandboxDenied,
+            CodexErr::Sandbox(SandboxErr::Timeout) => CodexErrorCode::SandboxTimeout,
+            CodexErr::Sandbox(SandboxErr::Signal(_)) => CodexErrorCode::SandboxSignal,
+            CodexErr::Sandbox(SandboxErr::LandlockRestrict) => CodexErrorCode::SandboxLandlockRestrict,
+            CodexErr::LandlockSandboxExecutableNotProvided => CodexErrorCode::SandboxLandlockRestrict,
+            CodexErr::Io(_) => CodexErrorCode::Io,
+            CodexErr::Reqwest(_) => CodexErrorCode::Reqwest,
+            CodexErr::Json(_) => CodexErrorCode::Json,
+            CodexErr::TokioJoin(_) => CodexErrorCode::InternalServerError,
+            CodexErr::EnvVar(_) => CodexErrorCode::EnvVar,
+            CodexErr::Serena(se) => match se {
+                serena_core::error::CoreError::Config { .. } => CodexErrorCode::SerenaConfig,
+                serena_core::error::CoreError::Io { .. } => CodexErrorCode::SerenaIo,
+                serena_core::error::CoreError::Protocol { .. } => CodexErrorCode::SerenaProtocol,
+                serena_core::error::CoreError::Tool { .. } => CodexErrorCode::SerenaTool,
+                serena_core::error::CoreError::Validation { .. } => CodexErrorCode::SerenaValidation,
+                serena_core::error::CoreError::NotFound { .. } => CodexErrorCode::SerenaNotFound,
+                serena_core::error::CoreError::LanguageServer { .. } => CodexErrorCode::SerenaLanguageServer,
+                serena_core::error::CoreError::Timeout { .. } => CodexErrorCode::SerenaTimeout,
+                serena_core::error::CoreError::Serialization { .. } => CodexErrorCode::SerenaSerialization,
+                serena_core::error::CoreError::Authentication { .. } => CodexErrorCode::SerenaAuthentication,
+                serena_core::error::CoreError::Permission { .. } => CodexErrorCode::SerenaPermission,
+                serena_core::error::CoreError::Internal { .. } => CodexErrorCode::SerenaInternal,
+            },
+        }
+    }
+
+    /// 标记是否建议重试（幂等调用前提下）
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            CodexErr::Stream(_) => true,
+            CodexErr::Timeout => true,
+            CodexErr::Interrupted => false,
+            CodexErr::UnexpectedStatus(status, _body) => {
+                *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+            }
+            CodexErr::UsageLimitReached | CodexErr::UsageNotIncluded => false,
+            CodexErr::InternalServerError => true,
+            CodexErr::RetryLimit(_) => false,
+            CodexErr::InternalAgentDied => true,
+            CodexErr::Sandbox(SandboxErr::Timeout) => true,
+            CodexErr::Sandbox(SandboxErr::Signal(_)) => true,
+            CodexErr::Sandbox(SandboxErr::Denied(..)) => false,
+            CodexErr::Sandbox(SandboxErr::LandlockRestrict) => false,
+            CodexErr::LandlockSandboxExecutableNotProvided => false,
+            CodexErr::Io(_) => true,
+            CodexErr::Reqwest(e) => e.is_timeout() || e.is_connect() || e.is_request()
+                || e.is_status() && e.status().map(|s| s.is_server_error()).unwrap_or(false),
+            CodexErr::Json(_) => false,
+            CodexErr::TokioJoin(_) => true,
+            CodexErr::EnvVar(_) => false,
+            CodexErr::Serena(se) => se.is_recoverable(),
+        }
+    }
+
+    /// 提供标准化上下文（供日志/遥测/上层 UI 使用）
+    pub fn context(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            CodexErr::UnexpectedStatus(status, body) => json!({
+                "status": status.as_u16(),
+                "body": body,
+            }),
+            CodexErr::RetryLimit(status) => json!({ "status": status.as_u16() }),
+            CodexErr::Sandbox(SandboxErr::Denied(code, stdout, stderr)) => json!({
+                "exit_code": code,
+                "stdout": stdout,
+                "stderr": stderr,
+            }),
+            CodexErr::Sandbox(SandboxErr::Signal(sig)) => json!({ "signal": sig }),
+            CodexErr::Serena(err) => serde_json::to_value(err).unwrap_or_else(|_| json!({"err": err.to_string()})),
+            CodexErr::Reqwest(e) => json!({
+                "reqwest": e.to_string(),
+                "is_timeout": e.is_timeout(),
+            }),
+            CodexErr::EnvVar(e) => json!({ "var": e.var, "instructions": e.instructions }),
+            other => json!({ "message": other.to_string() }),
+        }
+    }
+
+    /// 可选给出建议的下一次重试延迟（含指数退避+抖动），用于调用方自定义策略
+    pub fn retry_delay_hint(&self, attempt: u64) -> Option<Duration> {
+        if self.is_retryable() { Some(crate::util::backoff(attempt)) } else { None }
     }
 }
 

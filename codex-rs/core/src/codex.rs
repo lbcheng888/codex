@@ -28,6 +28,10 @@ use tracing::error;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
+
+// 简易占位 ContextStore，实现接口但无持久化（避免在 core 中引入集成依赖循环）
+struct ContextStoreGraphiti;
+impl crate::interfaces::ContextStore for ContextStoreGraphiti {}
 use uuid::Uuid;
 
 use crate::apply_patch::ApplyPatchExec;
@@ -224,6 +228,15 @@ pub(crate) struct Session {
 
     /// Manager for external MCP servers/tools.
     mcp_connection_manager: McpConnectionManager,
+
+    /// Serena工具调用器（通过稳定接口，可被禁用或替换）。
+    serena_tool_invoker: Option<Box<dyn crate::interfaces::ToolInvoker>>,
+
+    /// 可选的 LSP 外观实现（受配置/特性开关控制）。
+    lsp_facade: Option<Arc<dyn crate::interfaces::LspFacade>>,
+
+    /// 可选的 Agent 引擎（受配置/特性开关控制）。
+    agent_engine: Option<Arc<dyn crate::interfaces::AgentEngine>>,
 
     /// External notifier command (will be passed as args to exec()). When
     /// `None` this feature is disabled.
@@ -569,9 +582,28 @@ impl Session {
         arguments: Option<serde_json::Value>,
         timeout: Option<Duration>,
     ) -> anyhow::Result<CallToolResult> {
-        self.mcp_connection_manager
-            .call_tool(server, tool, arguments, timeout)
-            .await
+        if server == "serena" {
+            if let Some(invoker) = &self.serena_tool_invoker {
+                invoker
+                    .call_tool(server, tool, arguments, timeout)
+                    .await
+            } else {
+                // Serena 被禁用时，返回错误结果
+                Ok(CallToolResult {
+                    content: vec![mcp_types::ContentBlock::TextContent(mcp_types::TextContent {
+                        annotations: None,
+                        text: "serena tools disabled".to_string(),
+                        r#type: "text".to_string(),
+                    })],
+                    is_error: Some(true),
+                    structured_content: None,
+                })
+            }
+        } else {
+            self.mcp_connection_manager
+                .call_tool(server, tool, arguments, timeout)
+                .await
+        }
     }
 
     pub fn abort(&self) {
@@ -837,7 +869,7 @@ async fn submission_loop(
 
                 // Error messages to dispatch after SessionConfigured is sent.
                 let mut mcp_connection_errors = Vec::<Event>::new();
-                let (mcp_connection_manager, failed_clients) =
+                let (mcp_connection_manager, failed_clients) = if config.enable_mcp {
                     match McpConnectionManager::new(config.mcp_servers.clone()).await {
                         Ok((mgr, failures)) => (mgr, failures),
                         Err(e) => {
@@ -849,7 +881,11 @@ async fn submission_loop(
                             });
                             (McpConnectionManager::default(), Default::default())
                         }
-                    };
+                    }
+                } else {
+                    info!("MCP disabled by config.enable_mcp=false; skipping client startup");
+                    (McpConnectionManager::default(), Default::default())
+                };
 
                 // Surface individual client start-up failures to the user.
                 if !failed_clients.is_empty() {
@@ -864,6 +900,25 @@ async fn submission_loop(
                     }
                 }
                 let default_shell = shell::default_user_shell().await;
+                // 构造 Serena 工具调用器（两级开关：启用工具 + 启用旧进程内管理器）
+                let serena_tool_invoker: Option<Box<dyn crate::interfaces::ToolInvoker>> = if config.enable_serena_tools && config.enable_serena_inprocess {
+                    info!("Serena in-process manager enabled by config");
+                    Some(Box::new(crate::serena_inprocess::SerenaInProcessManager::new(cwd.clone())))
+                } else {
+                    if config.enable_serena_tools && !config.enable_serena_inprocess {
+                        info!("Serena tools enabled but in-process manager disabled by config; external Serena paths (if any) must be used");
+                    } else {
+                        info!("Serena tools disabled or in-process manager disabled; native Serena tools not available");
+                    }
+                    None
+                };
+
+                // 可选构造 LSP Facade（受配置与特性控制）
+                let lsp_facade: Option<Arc<dyn crate::interfaces::LspFacade>> = None;
+
+                // 可选构造 Agent 引擎（受配置与特性控制）。为避免依赖当前 Session 内部所有权，单独构造 in-process 工具适配供引擎使用。
+                let agent_engine: Option<Arc<dyn crate::interfaces::AgentEngine>> = None;
+
                 sess = Some(Arc::new(Session {
                     client,
                     tools_config: ToolsConfig::new(
@@ -879,9 +934,12 @@ async fn submission_loop(
                     approval_policy,
                     sandbox_policy,
                     shell_environment_policy: config.shell_environment_policy.clone(),
-                    cwd,
+                    cwd: cwd.clone(),
                     writable_roots,
                     mcp_connection_manager,
+                    serena_tool_invoker,
+                    lsp_facade,
+                    agent_engine,
                     notify,
                     state: Mutex::new(state),
                     rollout: Mutex::new(rollout_recorder),
@@ -1266,9 +1324,17 @@ async fn run_turn(
     sub_id: String,
     input: Vec<ResponseItem>,
 ) -> CodexResult<Vec<ProcessedResponseItem>> {
+    let mut merged_tools = sess.mcp_connection_manager.list_all_tools();
+    if let Some(invoker) = &sess.serena_tool_invoker {
+        merged_tools.extend(invoker.list_all_tools());
+    }
+    // 若两者均为空，则向日志说明，用于指标监控
+    if merged_tools.is_empty() {
+        trace!("No tools available: MCP disabled or no servers, and no Serena in-process invoker");
+    }
     let tools = get_openai_tools(
         &sess.tools_config,
-        Some(sess.mcp_connection_manager.list_all_tools()),
+        Some(merged_tools),
     );
 
     let prompt = Prompt {
@@ -1713,24 +1779,51 @@ async fn handle_function_call(
         }
         "update_plan" => handle_update_plan(sess, arguments, sub_id, call_id).await,
         _ => {
-            match sess.mcp_connection_manager.parse_tool_name(&name) {
-                Some((server, tool_name)) => {
-                    // TODO(mbolin): Determine appropriate timeout for tool call.
-                    let timeout = None;
-                    handle_mcp_tool_call(
-                        sess, &sub_id, call_id, server, tool_name, arguments, timeout,
-                    )
-                    .await
+            // Serena AgentEngine 优先：当函数名符合 serena 命名规范时，先尝试经由 AgentEngine 处理
+            if let Some(engine) = &sess.agent_engine {
+                if name.starts_with("serena__") {
+                    return engine
+                        .handle_function_call(name.clone(), arguments.clone(), call_id.clone())
+                        .await;
                 }
-                None => {
-                    // Unknown function: reply with structured failure so the model can adapt.
-                    ResponseInputItem::FunctionCallOutput {
+            }
+            // Serena 工具路径次之：当函数名符合 serena 命名规范时，走原生工具调用
+            if let Some(invoker) = &sess.serena_tool_invoker {
+                if let Some((_server, tool_name)) = invoker.parse_tool_name(&name) {
+                    let timeout = None;
+                    return handle_mcp_tool_call(
+                        sess,
+                        &sub_id,
                         call_id,
-                        output: FunctionCallOutputPayload {
-                            content: format!("unsupported call: {name}"),
-                            success: None,
-                        },
-                    }
+                        "serena".to_string(),
+                        tool_name,
+                        arguments,
+                        timeout,
+                    )
+                    .await;
+                }
+            }
+            // 否则回退到既有的 MCP 路径解析
+            if let Some((server, tool_name)) = sess.mcp_connection_manager.parse_tool_name(&name) {
+                let timeout = None;
+                handle_mcp_tool_call(
+                    sess,
+                    &sub_id,
+                    call_id,
+                    server,
+                    tool_name,
+                    arguments,
+                    timeout,
+                )
+                .await
+            } else {
+                // 未知函数：返回结构化失败，便于模型自适应
+                ResponseInputItem::FunctionCallOutput {
+                    call_id,
+                    output: FunctionCallOutputPayload {
+                        content: format!("unsupported call: {name}"),
+                        success: None,
+                    },
                 }
             }
         }

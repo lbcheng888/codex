@@ -34,6 +34,8 @@ use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use crate::event_processor::handle_last_message;
 use codex_common::create_config_summary_entries;
+use crate::markdown::render_markdown_to_ansi;
+use crate::stream_markdown::StreamingMd;
 
 /// This should be configurable. When used in CI, users may not want to impose
 /// a limit so they can see the full transcript.
@@ -61,6 +63,12 @@ pub(crate) struct EventProcessorWithHumanOutput {
     reasoning_started: bool,
     raw_reasoning_started: bool,
     last_message_path: Option<PathBuf>,
+
+    /// Whether ANSI coloring/styling should be applied to rendered content.
+    enable_ansi: bool,
+
+    /// Streaming Markdown renderer for deltas (handles fenced code blocks).
+    stream_md: StreamingMd,
 }
 
 impl EventProcessorWithHumanOutput {
@@ -89,6 +97,8 @@ impl EventProcessorWithHumanOutput {
                 reasoning_started: false,
                 raw_reasoning_started: false,
                 last_message_path,
+                enable_ansi: true,
+                stream_md: StreamingMd::new(true),
             }
         } else {
             Self {
@@ -107,6 +117,8 @@ impl EventProcessorWithHumanOutput {
                 reasoning_started: false,
                 raw_reasoning_started: false,
                 last_message_path,
+                enable_ansi: false,
+                stream_md: StreamingMd::new(false),
             }
         }
     }
@@ -190,7 +202,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     ts_println!(self, "{}\n", "codex".style(self.italic).style(self.magenta));
                     self.answer_started = true;
                 }
-                print!("{delta}");
+                let rendered = self.stream_md.write(&delta);
+                print!("{rendered}");
                 #[allow(clippy::expect_used)]
                 std::io::stdout().flush().expect("could not flush stdout");
             }
@@ -206,7 +219,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     );
                     self.reasoning_started = true;
                 }
-                print!("{delta}");
+                let rendered = self.stream_md.write(&delta);
+                print!("{rendered}");
                 #[allow(clippy::expect_used)]
                 std::io::stdout().flush().expect("could not flush stdout");
             }
@@ -215,7 +229,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     return CodexStatus::Running;
                 }
                 if !self.raw_reasoning_started {
-                    print!("{text}");
+                    let rendered = render_markdown_to_ansi(&text, self.enable_ansi);
+                    print!("{rendered}");
                     #[allow(clippy::expect_used)]
                     std::io::stdout().flush().expect("could not flush stdout");
                 } else {
@@ -232,7 +247,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 if !self.raw_reasoning_started {
                     self.raw_reasoning_started = true;
                 }
-                print!("{delta}");
+                let rendered = self.stream_md.write(&delta);
+                print!("{rendered}");
                 #[allow(clippy::expect_used)]
                 std::io::stdout().flush().expect("could not flush stdout");
             }
@@ -240,16 +256,15 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 // if answer_started is false, this means we haven't received any
                 // delta. Thus, we need to print the message as a new answer.
                 if !self.answer_started {
-                    ts_println!(
-                        self,
-                        "{}\n{}",
-                        "codex".style(self.italic).style(self.magenta),
-                        message,
-                    );
+                    // Render Markdown for the final message to improve readability
+                    // (headings, lists, code blocks, links, emphasis, etc.).
+                    let rendered = render_markdown_to_ansi(&message, self.enable_ansi);
+                    ts_println!(self, "{}\n{}", "codex".style(self.italic).style(self.magenta), rendered);
                 } else {
                     println!();
                     self.answer_started = false;
                 }
+                self.stream_md.reset();
             }
             EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
                 call_id,
@@ -478,13 +493,14 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                         ts_println!(
                             self,
                             "{}\n{}",
-                            "codex".style(self.italic).style(self.magenta),
-                            agent_reasoning_event.text,
+                            "thinking".style(self.italic).style(self.magenta),
+                            render_markdown_to_ansi(&agent_reasoning_event.text, self.enable_ansi),
                         );
                     } else {
                         println!();
                         self.reasoning_started = false;
                     }
+                    self.stream_md.reset();
                 }
             }
             EventMsg::SessionConfigured(session_configured_event) => {

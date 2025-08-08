@@ -9,6 +9,8 @@ use crate::config_types::ShellEnvironmentPolicy;
 use crate::config_types::ShellEnvironmentPolicyToml;
 use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
+use crate::config_types::{SerenaConfig, SerenaConfigToml, GraphitiConfig, GraphitiConfigToml};
+use crate::config_types::{ExternalDeciderConfig, ExternalDeciderConfigToml};
 use crate::model_family::ModelFamily;
 use crate::model_family::find_family_for_model;
 use crate::model_provider_info::ModelProviderInfo;
@@ -32,7 +34,8 @@ const OPENAI_DEFAULT_MODEL: &str = "gpt-5";
 /// the context window.
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
-const CONFIG_TOML_FILE: &str = "config.toml";
+const CONFIG_TOML_PRIMARY_FILE: &str = "codex.toml";
+const CONFIG_TOML_FALLBACK_FILE: &str = "config.toml";
 
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +44,14 @@ pub struct Config {
     pub model: String,
 
     pub model_family: ModelFamily,
+
+    /// 第一阶段下线：默认关闭外部 MCP 连接。
+    /// 可通过运行时开关 enable_mcp 回退启用。
+    pub enable_mcp: bool,
+
+    /// 第一阶段下线：默认关闭 core 中旧的 Serena in-process 管理器。
+    /// 需与 enable_serena_tools 联合开启以启用旧路径。
+    pub enable_serena_inprocess: bool,
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<u64>,
@@ -158,6 +169,21 @@ pub struct Config {
 
     /// The value for the `originator` header included with Responses API requests.
     pub internal_originator: Option<String>,
+
+    /// 是否启用 Serena 工具（阶段 A）。默认启用。
+    pub enable_serena_tools: bool,
+
+    /// 执行器选择（planner/executor）：阶段 A 默认 Codex，阶段 B 可切换 Serena。
+    pub planner_engine: PlannerEngine,
+
+    /// Serena 运行时配置（文件/环境变量综合解析）。
+    pub serena: SerenaConfig,
+
+    /// Graphiti（ContextStore 持久化）配置（文件/环境变量综合解析，默认开启）。
+    pub graphiti: GraphitiConfig,
+
+    /// 外部决策器（本地大模型）配置
+    pub external_decider: ExternalDeciderConfig,
 }
 
 impl Config {
@@ -217,22 +243,34 @@ pub fn load_config_as_toml_with_cli_overrides(
 /// Read `CODEX_HOME/config.toml` and return it as a generic TOML value. Returns
 /// an empty TOML table when the file does not exist.
 pub fn load_config_as_toml(codex_home: &Path) -> std::io::Result<TomlValue> {
-    let config_path = codex_home.join(CONFIG_TOML_FILE);
-    match std::fs::read_to_string(&config_path) {
-        Ok(contents) => match toml::from_str::<TomlValue>(&contents) {
-            Ok(val) => Ok(val),
+    // 优先读取 codex.toml，其次回退到历史的 config.toml
+    let primary = codex_home.join(CONFIG_TOML_PRIMARY_FILE);
+    let fallback = codex_home.join(CONFIG_TOML_FALLBACK_FILE);
+
+    let (path, contents) = match std::fs::read_to_string(&primary) {
+        Ok(contents) => (primary, contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::fs::read_to_string(&fallback) {
+            Ok(contents) => (fallback, contents),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::info!("codex.toml/config.toml not found, using defaults");
+                return Ok(TomlValue::Table(Default::default()));
+            }
             Err(e) => {
-                tracing::error!("Failed to parse config.toml: {e}");
-                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                tracing::error!("Failed to read fallback config file: {e}");
+                return Err(e);
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::info!("config.toml not found, using defaults");
-            Ok(TomlValue::Table(Default::default()))
-        }
         Err(e) => {
-            tracing::error!("Failed to read config.toml: {e}");
-            Err(e)
+            tracing::error!("Failed to read primary config file: {e}");
+            return Err(e);
+        }
+    };
+
+    match toml::from_str::<TomlValue>(&contents) {
+        Ok(val) => Ok(val),
+        Err(e) => {
+            tracing::error!("Failed to parse {}: {e}", path.display());
+            Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         }
     }
 }
@@ -240,7 +278,8 @@ pub fn load_config_as_toml(codex_home: &Path) -> std::io::Result<TomlValue> {
 /// Patch `CODEX_HOME/config.toml` project state.
 /// Use with caution.
 pub fn set_project_trusted(codex_home: &Path, project_path: &Path) -> anyhow::Result<()> {
-    let config_path = codex_home.join(CONFIG_TOML_FILE);
+    // 兼容历史逻辑，写入 fallback 文件 config.toml
+    let config_path = codex_home.join(CONFIG_TOML_FALLBACK_FILE);
     // Parse existing config if present; otherwise start a new document.
     let mut doc = match std::fs::read_to_string(config_path.clone()) {
         Ok(s) => s.parse::<DocumentMut>()?,
@@ -315,6 +354,12 @@ pub struct ConfigToml {
     /// Optional override of model selection.
     pub model: Option<String>,
 
+    /// 第一阶段下线：是否启用 MCP（默认 false）。
+    pub enable_mcp: Option<bool>,
+
+    /// 第一阶段下线：是否启用旧的 Serena in-process 管理器（默认 false）。
+    pub enable_serena_inprocess: Option<bool>,
+
     /// Provider to use from the model_providers map.
     pub model_provider: Option<String>,
 
@@ -355,6 +400,10 @@ pub struct ConfigToml {
     /// User-defined provider entries that extend/override the built-in list.
     #[serde(default)]
     pub model_providers: HashMap<String, ModelProviderInfo>,
+
+    /// 外部决策器配置
+    #[serde(default)]
+    pub external_decider: ExternalDeciderConfigToml,
 
     /// Maximum number of bytes to include from an AGENTS.md project doc file.
     pub project_doc_max_bytes: Option<usize>,
@@ -403,7 +452,22 @@ pub struct ConfigToml {
     /// The value for the `originator` header included with Responses API requests.
     pub internal_originator: Option<String>,
 
+    /// 是否启用 Serena 工具（阶段 A）。
+    pub enable_serena_tools: Option<bool>,
+
+    /// 选择执行器：codex 内置 或 serena。阶段 A 默认 codex。
+    #[serde(default)]
+    pub planner_engine: Option<PlannerEngineToml>,
+
     pub projects: Option<HashMap<String, ProjectConfig>>,
+
+    /// Serena 运行配置（来自 [serena] 节）
+    #[serde(default)]
+    pub serena: Option<SerenaConfigToml>,
+
+    /// Graphiti（ContextStore 持久化）配置（来自 [graphiti] 节）
+    #[serde(default)]
+    pub graphiti: Option<GraphitiConfigToml>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -482,6 +546,12 @@ pub struct ConfigOverrides {
     pub include_plan_tool: Option<bool>,
     pub disable_response_storage: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
+    pub enable_serena_tools: Option<bool>,
+    pub planner_engine: Option<PlannerEngine>,
+    /// 运行时回退开关（CLI 覆盖）：启用 MCP
+    pub enable_mcp: Option<bool>,
+    /// 运行时回退开关（CLI 覆盖）：启用旧的 Serena in-process 管理器
+    pub enable_serena_inprocess: Option<bool>,
 }
 
 impl Config {
@@ -507,6 +577,10 @@ impl Config {
             include_plan_tool,
             disable_response_storage,
             show_raw_agent_reasoning,
+            enable_serena_tools,
+            planner_engine: planner_engine_override,
+            enable_mcp: enable_mcp_override,
+            enable_serena_inprocess: enable_serena_inprocess_override,
         } = overrides;
 
         let config_profile = match config_profile_key.as_ref().or(cfg.profile.as_ref()) {
@@ -629,6 +703,7 @@ impl Config {
             notify: cfg.notify,
             user_instructions,
             base_instructions,
+            // MCP 默认关闭：仍解析配置，但是否启用由 enable_mcp 控制
             mcp_servers: cfg.mcp_servers,
             model_providers,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(PROJECT_DOC_MAX_BYTES),
@@ -660,6 +735,24 @@ impl Config {
             experimental_resume,
             include_plan_tool: include_plan_tool.unwrap_or(false),
             internal_originator: cfg.internal_originator,
+            enable_serena_tools: enable_serena_tools
+                .or(cfg.enable_serena_tools)
+                .unwrap_or(true),
+            planner_engine: planner_engine_override
+                .or(cfg.planner_engine.map(|t| match t { PlannerEngineToml::Codex =e PlannerEngine::Codex, PlannerEngineToml::Serena =e PlannerEngine::Serena }))
+                .unwrap_or(PlannerEngine::Codex),
+
+            // 第一阶段默认关闭
+            enable_mcp: enable_mcp_override
+                .or(cfg.enable_mcp)
+                .unwrap_or(false),
+            enable_serena_inprocess: enable_serena_inprocess_override
+                .or(cfg.enable_serena_inprocess)
+                .unwrap_or(false),
+
+            serena: SerenaConfig::resolve(cfg.serena),
+            graphiti: GraphitiConfig::resolve(cfg.graphiti, &codex_home),
+            external_decider: ExternalDeciderConfig::resolve(Some(cfg.external_decider)),
         };
         Ok(config)
     }
@@ -726,6 +819,19 @@ impl Config {
 
 fn default_model() -> String {
     OPENAI_DEFAULT_MODEL.to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerEngine {
+    Codex,
+    Serena,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PlannerEngineToml {
+    Codex,
+    Serena,
 }
 
 /// Returns the path to the Codex configuration directory, which can be
@@ -1001,7 +1107,7 @@ disable_response_storage = true
                 model_provider_id: "openai".to_string(),
                 model_provider: fixture.openai_provider.clone(),
                 approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 disable_response_storage: false,
                 user_instructions: None,
@@ -1024,6 +1130,8 @@ disable_response_storage = true
                 base_instructions: None,
                 include_plan_tool: false,
                 internal_originator: None,
+                serena: SerenaConfig::default(),
+                external_decider: crate::config_types::ExternalDeciderConfig::default(),
             },
             o3_profile_config
         );
@@ -1052,7 +1160,7 @@ disable_response_storage = true
             model_provider_id: "openai-chat-completions".to_string(),
             model_provider: fixture.openai_chat_completions_provider.clone(),
             approval_policy: AskForApproval::UnlessTrusted,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             disable_response_storage: false,
             user_instructions: None,
@@ -1075,6 +1183,8 @@ disable_response_storage = true
             base_instructions: None,
             include_plan_tool: false,
             internal_originator: None,
+            serena: SerenaConfig::default(),
+            external_decider: crate::config_types::ExternalDeciderConfig::default(),
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -1118,7 +1228,7 @@ disable_response_storage = true
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             approval_policy: AskForApproval::OnFailure,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             disable_response_storage: true,
             user_instructions: None,
@@ -1141,6 +1251,7 @@ disable_response_storage = true
             base_instructions: None,
             include_plan_tool: false,
             internal_originator: None,
+            external_decider: crate::config_types::ExternalDeciderConfig::default(),
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);

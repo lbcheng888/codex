@@ -21,15 +21,6 @@ While we are [working to close the gap between the TypeScript and Rust implement
 
 Codex supports a rich set of configuration options. Note that the Rust CLI uses `config.toml` instead of `config.json`. See [`config.md`](./config.md) for details.
 
-### Model Context Protocol Support
-
-Codex CLI functions as an MCP client that can connect to MCP servers on startup. See the [`mcp_servers`](./config.md#mcp_servers) section in the configuration documentation for details.
-
-It is still experimental, but you can also launch Codex as an MCP _server_ by running `codex mcp`. Use the [`@modelcontextprotocol/inspector`](https://github.com/modelcontextprotocol/inspector) to try it out:
-
-```shell
-npx @modelcontextprotocol/inspector codex mcp
-```
 
 ### Notifications
 
@@ -71,20 +62,27 @@ codex debug landlock [--full-auto] [COMMAND]...
 
 ### Selecting a sandbox policy via `--sandbox`
 
-The Rust CLI exposes a dedicated `--sandbox` (`-s`) flag that lets you pick the sandbox policy **without** having to reach for the generic `-c/--config` option:
+Rust CLI 提供 `--sandbox`（`-s`）参数用于选择沙箱策略，而无需使用通用的 `-c/--config` 覆盖：
 
 ```shell
-# Run Codex with the default, read-only sandbox
-codex --sandbox read-only
+# 默认已取消沙箱（危险）：关闭所有沙箱限制
+codex --sandbox danger-full-access
 
 # Allow the agent to write within the current workspace while still blocking network access
 codex --sandbox workspace-write
 
-# Danger! Disable sandboxing entirely (only do this if you are already running in a container or other isolated env)
-codex --sandbox danger-full-access
+# 使用只读沙箱（限制最严）
+codex --sandbox read-only
 ```
 
-The same setting can be persisted in `~/.codex/config.toml` via the top-level `sandbox_mode = "MODE"` key, e.g. `sandbox_mode = "workspace-write"`.
+同样，你也可以在 `~/.codex/config.toml` 中通过顶层 `sandbox_mode = "MODE"` 持久化该设置，例如：`sandbox_mode = "workspace-write"`。
+
+## Serena integration status
+
+Phase A (native in-process tools integration) complete. LSP facade and agent engine integration are progressing as Phase B. See:
+- docs/codex_serena_audit.md (task status and conclusions)
+- docs/adr/ADR-serena-integration-topology.md
+- docs/release/step21_gray_release.md
 
 ## Code Organization
 

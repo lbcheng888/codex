@@ -502,8 +502,8 @@ impl HistoryCell {
                 .unwrap_or_default()
         };
 
-        // 📂 Workspace
-        lines.push(Line::from(vec!["📂 ".into(), "Workspace".bold()]));
+        // Workspace
+        lines.push(Line::from(vec!["Workspace".bold()]));
         // Path (home-relative, e.g., ~/code/project)
         let cwd_str = match relativize_to_home(&config.cwd) {
             Some(rel) if !rel.as_os_str().is_empty() => format!("~/{}", rel.display()),
@@ -529,11 +529,11 @@ impl HistoryCell {
 
         lines.push(Line::from(""));
 
-        // 👤 Account (only if ChatGPT tokens exist), shown under the first block
+        // Account (only if ChatGPT tokens exist), shown under the first block
         let auth_file = get_auth_file(&config.codex_home);
         if let Ok(auth) = try_read_auth_json(&auth_file) {
             if let Some(tokens) = auth.tokens.clone() {
-                lines.push(Line::from(vec!["👤 ".into(), "Account".bold()]));
+                lines.push(Line::from(vec!["Account".bold()]));
                 lines.push(Line::from("  • Signed in with ChatGPT"));
 
                 let info = tokens.id_token;
@@ -561,8 +561,8 @@ impl HistoryCell {
             }
         }
 
-        // 🧠 Model
-        lines.push(Line::from(vec!["🧠 ".into(), "Model".bold()]));
+        // Model
+        lines.push(Line::from(vec!["Model".bold()]));
         lines.push(Line::from(vec![
             "  • Name: ".into(),
             config.model.clone().into(),
@@ -590,8 +590,8 @@ impl HistoryCell {
 
         lines.push(Line::from(""));
 
-        // 📊 Token Usage
-        lines.push(Line::from(vec!["📊 ".into(), "Token Usage".bold()]));
+        // Token Usage
+        lines.push(Line::from(vec!["Token Usage".bold()]));
         // Input: <input> [+ <cached> cached]
         let mut input_line_spans: Vec<Span<'static>> = vec![
             "  • Input: ".into(),
@@ -639,7 +639,7 @@ impl HistoryCell {
 
     pub(crate) fn new_error_event(message: String) -> Self {
         let lines: Vec<Line<'static>> =
-            vec![vec!["🖐 ".red().bold(), message.into()].into(), "".into()];
+            vec![vec!["ERROR: ".red().bold(), message.into()].into(), "".into()];
         HistoryCell::ErrorEvent {
             view: TextBlock::new(lines),
         }
@@ -666,7 +666,7 @@ impl HistoryCell {
         let empty = width.saturating_sub(filled);
 
         let mut header: Vec<Span> = Vec::new();
-        header.push(Span::raw("📋"));
+        // Removed clipboard emoji
         header.push(Span::styled(
             " Updated",
             Style::default().add_modifier(Modifier::BOLD).magenta(),
@@ -763,12 +763,12 @@ impl HistoryCell {
             PatchEventType::ApprovalRequest => "proposed patch",
             PatchEventType::ApplyBegin {
                 auto_approved: true,
-            } => "✏️ Applying patch",
+            } => "Applying patch",
             PatchEventType::ApplyBegin {
                 auto_approved: false,
             } => {
                 let lines: Vec<Line<'static>> = vec![
-                    Line::from("✏️ Applying patch".magenta().bold()),
+                    Line::from("Applying patch".magenta().bold()),
                     Line::from(""),
                 ];
                 return Self::PendingPatch {
@@ -796,7 +796,7 @@ impl HistoryCell {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         // Failure title
-        lines.push(Line::from("✘ Failed to apply patch".magenta().bold()));
+        lines.push(Line::from("Failed to apply patch".magenta().bold()));
 
         if !stderr.trim().is_empty() {
             let mut iter = stderr.lines();
