@@ -1,0 +1,26 @@
+[package]
+name = "serena-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serena-core = { path = "../serena-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+serde_repr = { workspace = true }
+notify = "6"
+parking_lot = { workspace = true }
+
+# Define a test-only helper binary to build the fake LSP executable
+# Source at crates/serena-lsp/tests/bin/fake_lsp.rs
+[[bin]]
+name = "fake_lsp"
+path = "tests/bin/fake_lsp.rs"
+test = false
+bench = false
+doc = false

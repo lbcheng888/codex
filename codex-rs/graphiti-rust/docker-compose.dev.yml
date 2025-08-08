@@ -1,0 +1,44 @@
+# Development override for docker-compose.yml
+# Use with: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+version: '3.8'
+
+services:
+  graphiti:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      target: development
+    volumes:
+      # Mount source code for hot reload
+      - .:/app
+      - /app/target  # Exclude target directory
+      - cargo_cache:/usr/local/cargo/registry
+    environment:
+      # Development-specific environment
+      - RUST_LOG=debug,graphiti=trace
+      - RUST_BACKTRACE=1
+      - CARGO_INCREMENTAL=1
+    command: ["cargo", "watch", "-x", "run --bin graphiti-mcp-server"]
+    
+  # Development database with exposed ports for debugging
+  neo4j:
+    environment:
+      # More verbose logging for development
+      - NEO4J_dbms_logs_debug_level=DEBUG
+    ports:
+      - "7474:7474"  # Neo4j Browser
+      - "7687:7687"  # Bolt protocol
+      - "7473:7473"  # HTTPS
+    
+  # Development Ollama with model auto-pull
+  ollama:
+    environment:
+      - OLLAMA_DEBUG=1
+    volumes:
+      - ollama_dev_data:/root/.ollama
+      - ./scripts/ollama-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+
+volumes:
+  cargo_cache:
+  ollama_dev_data:

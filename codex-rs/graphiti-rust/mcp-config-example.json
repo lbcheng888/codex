@@ -1,0 +1,97 @@
+{
+  "mcpServers": {
+    "graphiti-auto-project": {
+      "type": "stdio",
+      "command": "cargo",
+      "args": [
+        "run",
+        "-p",
+        "graphiti-mcp",
+        "--bin",
+        "graphiti-mcp-server"
+      ],
+      "cwd": "/Users/lbcheng/codex/current-project",
+      "env": {
+        "RUST_LOG": "info"
+      },
+      "alwaysAllow": [
+        "add_memory",
+        "search_memories",
+        "get_stats",
+        "export_knowledge",
+        "search_code_entities"
+      ]
+    },
+    "graphiti-with-project": {
+      "type": "stdio",
+      "command": "cargo",
+      "args": [
+        "run",
+        "-p",
+        "graphiti-mcp",
+        "--bin",
+        "graphiti-mcp-server",
+        "--project",
+        "/Users/lbcheng/codex"
+      ],
+      "cwd": "/Users/lbcheng/codex/codex-rs/graphiti-rust",
+      "env": {
+        "RUST_LOG": "info",
+        "GRAPHITI_PROJECT": "/Users/lbcheng/codex"
+      },
+      "alwaysAllow": [
+        "add_memory",
+        "search_memories",
+        "get_stats",
+        "export_knowledge",
+        "search_code_entities"
+      ]
+    },
+    "graphiti-custom-db": {
+      "type": "stdio",
+      "command": "cargo",
+      "args": [
+        "run",
+        "-p",
+        "graphiti-mcp",
+        "--bin",
+        "graphiti-mcp-server",
+        "--db-path",
+        "/custom/path/to/project.db"
+      ],
+      "cwd": "/Users/lbcheng/codex/codex-rs/graphiti-rust",
+      "env": {
+        "RUST_LOG": "info",
+        "GRAPHITI_DB_PATH": "/custom/path/to/project.db",
+        "GRAPHITI_DATA_DIR": "/custom/path/to/data"
+      },
+      "alwaysAllow": [
+        "add_memory",
+        "search_memories", 
+        "get_stats",
+        "export_knowledge",
+        "search_code_entities"
+      ]
+    },
+    "graphiti-precompiled": {
+      "type": "stdio",
+      "command": "/Users/lbcheng/codex/codex-rs/graphiti-rust/target/debug/graphiti-mcp-server",
+      "args": [
+        "--project",
+        "/Users/lbcheng/codex"
+      ],
+      "cwd": "/Users/lbcheng/codex/codex-rs/graphiti-rust",
+      "env": {
+        "RUST_LOG": "info",
+        "GRAPHITI_PROJECT": "/Users/lbcheng/codex"
+      },
+      "alwaysAllow": [
+        "add_memory",
+        "search_memories",
+        "get_stats",
+        "export_knowledge",
+        "search_code_entities"
+      ]
+    }
+  }
+}

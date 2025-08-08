@@ -1,0 +1,37 @@
+[package]
+name = "codex-graphiti"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "codex_graphiti"
+path = "src/lib.rs"
+
+[features]
+# Guard Graphiti integration so it doesn't build unless explicitly enabled
+# Enable with: cargo build -p codex-graphiti --features graphiti_context
+graphiti_context = [
+    "dep:graphiti-core",
+    "dep:graphiti-cozo",
+]
+
+default = []
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+codex-core = { package = "codex-core", path = "../../core" }
+
+# Optional Graphiti deps (enabled via the feature above)
+graphiti-core = { path = "../../graphiti-rust/crates/graphiti-core", optional = true }
+# 显式选择 sqlx 后端，避免引入 sqlite3-src
+graphiti-cozo = { path = "../../graphiti-rust/crates/graphiti-cozo", optional = true, default-features = false, features = ["backend-sqlx"] }
+
+[dev-dependencies]
+Tokio = { package = "tokio", version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }

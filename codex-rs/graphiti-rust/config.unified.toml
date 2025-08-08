@@ -1,0 +1,72 @@
+[server]
+host = "0.0.0.0"
+port = 8090
+
+# 统一智能配置 - 自动选择最佳方案
+# 优先级：本地规则 NER > 嵌入向量 > LLM（如果可用）
+
+# LLM 配置（可选，用于高级实体关系提取）
+[llm]
+provider = "Ollama"
+base_url = "http://localhost:11434"
+model = "llama3.1:8b"
+temperature = 0.3
+max_retries = 3
+enabled = false  # 设为 true 启用 LLM 增强
+
+# 嵌入配置（核心功能，必需）
+[embedder]
+provider = "huggingface"
+api_key = ""
+model = "Qwen/Qwen3-Embedding-8B"
+dimension = 4096
+batch_size = 8
+timeout = 180
+
+# NER 配置（本地实体提取）
+[ner]
+enabled = true                          # 启用本地 NER
+provider = "rule_based"                 # "rule_based" 或 "candle_model"
+model = ""                              # 如果使用 Candle，指定模型
+min_confidence = 0.7                    # 最小置信度阈值
+merge_overlapping = true                # 合并重叠实体
+languages = ["chinese", "english"]      # 支持的语言
+
+# CozoDB 图数据库配置
+[cozo]
+engine = "sqlite"
+path = "./data/graphiti.db"
+options = {}
+
+# Graphiti 智能配置
+[graphiti]
+name = "unified"
+# 智能模式设置
+mode = "auto"                          # "auto", "fast", "accurate", "hybrid"
+# auto: 自动选择最佳方案
+# fast: 仅使用规则 NER + 嵌入
+# accurate: 使用 LLM + Candle NER + 嵌入
+# hybrid: 规则 NER + LLM 验证 + 嵌入
+
+# 实体提取策略
+extraction_strategy = "progressive"     # "progressive", "parallel", "cascade"
+# progressive: 先规则，不够再用 LLM
+# parallel: 同时使用多种方法，投票决定
+# cascade: 规则 -> Candle -> LLM 逐级提升
+
+# 功能开关
+enable_deduplication = true
+enable_relationship_inference = true    # 自动推断实体关系
+enable_temporal_analysis = true         # 时间关系分析
+enable_context_enhancement = true       # 上下文增强
+
+# 性能与质量平衡
+min_entity_confidence = 0.6
+min_relationship_confidence = 0.5
+max_context_window = 4000
+generate_embeddings = true
+
+# 智能优化
+cache_embeddings = true                 # 缓存嵌入结果
+batch_processing = true                 # 批量处理优化
+async_extraction = true                 # 异步实体提取

@@ -1,0 +1,40 @@
+[server]
+host = "0.0.0.0"
+port = 8090
+
+# 纯本地配置 - 无需任何外部 API
+
+# LLM 配置（禁用）
+[llm]
+provider = "Ollama"
+base_url = "http://localhost:11434"
+model = "llama3.1:8b"
+enabled = false  # 禁用 LLM
+
+# 嵌入配置（使用本地 Ollama）
+[embedder]
+provider = "ollama"
+api_key = ""
+model = "nomic-embed-text"
+dimension = 768
+batch_size = 8
+timeout = 30
+
+# CozoDB 图数据库配置
+[cozo]
+engine = "sqlite"
+path = "./data/graphiti.db"
+options = {}
+
+# Graphiti 配置
+[graphiti]
+name = "local-only"
+mode = "fast"                          # 快速模式：规则 NER + 本地嵌入
+enable_deduplication = true
+enable_relationship_inference = true
+enable_temporal_analysis = true
+min_entity_confidence = 0.6
+min_relationship_confidence = 0.5
+max_context_window = 4000
+generate_embeddings = true
+skip_entity_extraction = false         # 使用规则 NER

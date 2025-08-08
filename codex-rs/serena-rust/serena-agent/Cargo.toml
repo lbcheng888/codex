@@ -1,0 +1,31 @@
+[package]
+name = "serena-agent"
+version = "0.1.0"
+edition = "2021"
+authors = ["Serena Rust Port Team"]
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+time = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+
+# Internal dependencies
+serena-core = { path = "../serena-core" }
+serena-config = { path = "../serena-config" }
+serena-tools = { path = "../serena-tools" }
+serena-lsp = { path = "../serena-lsp" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }

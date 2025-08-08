@@ -1,0 +1,13 @@
+# 使用 --help 不应产生分页器输出
+$ ${CARGO_BIN_EXE_serena-cli} --help
+?status: 0
+
+# 列出工具列表，统计数量并输出名称（输出具体内容随版本变化，快照锁定）
+$ ${CARGO_BIN_EXE_serena-cli} list-tools
+?status: 0
+
+# 导出工具 schema，输出目标路径提示
+$ ${CARGO_BIN_EXE_serena-cli} export-tool-schemas
+?status: 0
+
+

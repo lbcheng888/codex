@@ -1,0 +1,35 @@
+[server]
+host = "0.0.0.0"
+port = 8091
+
+# 免费的 LLM 配置
+[llm]
+provider = "Ollama"                    # 本地免费 LLM
+base_url = "http://localhost:11434"
+model = "llama3.1:8b"
+temperature = 0.3
+max_retries = 3
+
+# Qwen3-Embedding-8B 配置 (需要 HuggingFace API 密钥)
+[embedder]
+provider = "huggingface"               # 使用 HuggingFace Inference API
+api_key = "YOUR_HUGGINGFACE_API_KEY"   # 请替换为您的 HuggingFace API 密钥
+model = "Qwen/Qwen3-Embedding-8B"      # Qwen3 嵌入模型 (4096维度)
+dimension = 4096                       # Qwen3-Embedding-8B 的维度
+batch_size = 16                        # HuggingFace API 推荐的批次大小
+timeout = 60                           # 网络请求超时时间
+
+# CozoDB 图数据库配置 (纯 Rust 实现，支持关系-图-向量混合查询)
+[cozo]
+engine = "mem"                         # 内存模式，快速开发和测试 (也可用 "sqlite")
+path = "./data/graphiti.db"            # SQLite 模式的数据库文件路径
+options = {}
+
+# Graphiti 配置
+[graphiti]
+name = "default"
+enable_deduplication = true
+min_entity_confidence = 0.7
+min_relationship_confidence = 0.6
+max_context_window = 4000
+generate_embeddings = true

@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "graphiti": {
+      "command": "/Users/lbcheng/codex/graphiti-rust/target/release/graphiti-mcp-server",
+      "args": [
+        "--stdio",
+        "--project",
+        "/Users/lbcheng/codex",
+        "--log-level",
+        "warn"
+      ],
+      "env": {
+        "RUST_LOG": "warn"
+      }
+    }
+  }
+}

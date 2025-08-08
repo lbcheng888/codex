@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "graphiti": {
+      "command": "cargo",
+      "args": [
+        "run", 
+        "--bin", 
+        "graphiti-mcp-server",
+        "--",
+        "--config",
+        "/Users/lbcheng/graphiti/graphiti-rust/config.free.toml",
+        "--log-level",
+        "info"
+      ],
+      "cwd": "/Users/lbcheng/graphiti/graphiti-rust",
+      "env": {
+        "RUST_LOG": "info"
+      }
+    }
+  }
+}

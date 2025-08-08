@@ -1,0 +1,8 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 9333 },
+  "workspace": ".",
+  "languages": ["rust"],
+  "features": { "completion": true, "hover": true, "diagnostics": true },
+  "logLevel": "info"
+}
+

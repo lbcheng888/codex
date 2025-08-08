@@ -1,0 +1,35 @@
+[server]
+host = "0.0.0.0"
+port = 8091
+
+# 使用更强大的 Qwen2.5 模型进行结构化输出
+[llm]
+provider = "Ollama"                    # 本地免费 LLM
+base_url = "http://localhost:11434"
+model = "qwen2.5:7b"                   # Qwen2.5 7B - 更好的指令遵循能力
+temperature = 0.1                      # 低温度以获得更一致的结构化输出
+max_retries = 3
+
+# 免费嵌入配置 (使用本地 Ollama 嵌入)
+[embedder]
+provider = "ollama"                    # 使用本地 Ollama 嵌入
+base_url = "http://localhost:11434"    # Ollama 服务地址
+model = "nomic-embed-text"             # 轻量级嵌入模型 (768维度)
+dimension = 768                        # nomic-embed-text 的维度
+batch_size = 32                        # 本地模型可以使用更大批次
+timeout = 30                           # 本地模型响应更快
+
+# CozoDB 图数据库配置 (纯 Rust 实现，支持关系-图-向量混合查询)
+[cozo]
+engine = "mem"                         # 内存模式，快速开发和测试 (也可用 "sqlite")
+path = "./data/graphiti.db"            # SQLite 模式的数据库文件路径
+options = {}
+
+# Graphiti 配置
+[graphiti]
+name = "default"
+enable_deduplication = true
+min_entity_confidence = 0.7
+min_relationship_confidence = 0.6
+max_context_window = 4000
+generate_embeddings = true

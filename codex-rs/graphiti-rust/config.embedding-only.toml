@@ -1,0 +1,42 @@
+[server]
+host = "0.0.0.0"
+port = 8090
+
+# 嵌入模式配置 - 不需要 LLM，只使用嵌入
+# 这种模式下：
+# - 不会自动提取实体和关系
+# - 整个文本作为一个 Episode 存储
+# - 使用嵌入进行语义搜索
+
+# 占位 LLM 配置（不会实际使用）
+[llm]
+provider = "Ollama"
+base_url = "http://localhost:11434"
+model = "llama3.1:8b"
+temperature = 0.3
+max_retries = 3
+
+# 嵌入配置 (使用 Qwen3-Embedding-8B via Hugging Face)
+[embedder]
+provider = "huggingface"               # 使用 HuggingFace Inference API
+api_key = ""                           # HF 免费层不需要 API key
+model = "Qwen/Qwen3-Embedding-8B"      # Qwen3 8B参数嵌入模型
+dimension = 4096                       # Qwen3-Embedding-8B 的维度
+batch_size = 8                         # HF API 使用更小的批次
+timeout = 180                          # HF API 可能需要更长时间（模型冷启动）
+
+# CozoDB 图数据库配置
+[cozo]
+engine = "sqlite"                      # 持久化存储
+path = "./data/graphiti.db"            # 数据库文件路径
+options = {}
+
+# Graphiti 配置
+[graphiti]
+name = "embedding-only"
+enable_deduplication = false           # 简化模式不需要去重
+min_entity_confidence = 0.0            # 不提取实体
+min_relationship_confidence = 0.0      # 不提取关系
+max_context_window = 4000
+generate_embeddings = true             # 生成嵌入是核心功能
+skip_entity_extraction = true          # 跳过实体提取（新增配置）

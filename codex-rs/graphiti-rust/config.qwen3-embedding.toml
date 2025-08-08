@@ -1,0 +1,35 @@
+[server]
+host = "0.0.0.0"
+port = 8091
+
+# 免费的 LLM 配置
+[llm]
+provider = "Ollama"                    # 本地免费 LLM
+base_url = "http://localhost:11434"
+model = "llama3.1:8b"
+temperature = 0.3
+max_retries = 3
+
+# Qwen3-Embedding-8B 配置 (本地 Ollama)
+[embedder]
+provider = "ollama"                    # 使用本地 Ollama
+api_key = "not-needed-for-ollama"      # Ollama 不需要 API 密钥
+model = "dengcao/Qwen3-Embedding-8B:Q5_K_M"  # Qwen3 嵌入模型 (推荐量化版本)
+dimension = 4096                       # Qwen3-Embedding-8B 的维度
+batch_size = 8                         # 适合 8B 模型的批次大小
+timeout = 60                           # 本地模型处理时间
+
+# CozoDB 图数据库配置 (纯 Rust 实现，支持关系-图-向量混合查询)
+[cozo]
+engine = "mem"                         # 内存模式，快速开发和测试 (也可用 "sqlite")
+path = "./data/graphiti.db"            # SQLite 模式的数据库文件路径
+options = {}
+
+# Graphiti 配置
+[graphiti]
+name = "default"
+enable_deduplication = true
+min_entity_confidence = 0.7
+min_relationship_confidence = 0.6
+max_context_window = 4000
+generate_embeddings = true

@@ -1,0 +1,42 @@
+[package]
+name = "codex-serena"
+edition = "2024"
+version = { workspace = true }
+
+[lib]
+name = "codex_serena"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[features]
+# 子能力开关
+# - tools: 仅工具调用
+# - lsp: LSP 相关接口
+# - agent: Agent 相关接口
+# - serena_native: 聚合特性，默认开启
+
+tools = ["dep:serena-tools", "dep:serena-core"]
+lsp = ["dep:serena-lsp", "dep:serena-core"]
+agent = ["dep:serena-agent", "dep:serena-core"]
+
+# 默认聚合，覆盖为 native 全量
+serena_native = ["tools", "lsp", "agent"]
+
+default = ["serena_native"]
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+codex-core = { path = "../../core" }
+
+# serena 生态依赖：通过 feature gate 控制是否编译
+serena-core = { path = "../../serena-rust/serena-core", optional = true }
+serena-tools = { path = "../../serena-rust/serena-tools", optional = true }
+serena-lsp = { path = "../../serena-rust/serena-lsp", optional = true }
+serena-agent = { path = "../../serena-rust/serena-agent", optional = true }

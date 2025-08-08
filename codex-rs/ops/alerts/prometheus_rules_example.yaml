@@ -1,0 +1,59 @@
+groups:
+- name: codex-serena-gray-release
+  interval: 30s
+  rules:
+  # 可用性：错误率回归（Critical 触发自动回退）
+  - alert: CodexSerenaHighErrorRate
+    expr: |
+      (
+        sum(rate(http_requests_total{job="codex",route=~"/agent|/tools|/lsp",code=~"5.."}[5m]))
+        /
+        sum(rate(http_requests_total{job="codex",route=~"/agent|/tools|/lsp"}[5m]))
+      ) > on() group_left
+      (
+        avg_over_time(codex_serena_error_rate_baseline[1m]) + 3 * stddev_over_time(codex_serena_error_rate_baseline[1m])
+      )
+    for: 5m
+    labels:
+      severity: critical
+      action: auto_rollback
+      rollback_strategy: scale_down
+      owner: codex-serena
+    annotations:
+      summary: Serena 错误率高于基线阈值（5m）
+      description: 错误率超出基线+3σ 持续5分钟，触发自动缩量或回退。
+
+  # 性能：P99 延迟回归（Critical 触发自动回退）
+  - alert: CodexSerenaHighLatencyP99
+    expr: |
+      histogram_quantile(
+        0.99,
+        sum(rate(http_request_duration_seconds_bucket{job="codex",route=~"/agent|/tools|/lsp"}[10m])) by (le)
+      ) > on() group_left
+      ( codex_serena_latency_p99_baseline * 1.2 )
+    for: 10m
+    labels:
+      severity: critical
+      action: auto_rollback
+      rollback_strategy: scale_down
+      owner: codex-serena
+    annotations:
+      summary: Serena P99 延迟回归（10m）
+      description: P99 超出基线的 1.2 倍，持续 10 分钟，触发自动缩量或回退。
+
+  # 业务成功率下降（Warning 观察）
+  - alert: CodexSerenaBusinessSuccessDrop
+    expr: |
+      (
+        sum(rate(codex_serena_business_success_total[15m]))
+        /
+        sum(rate(codex_serena_business_total[15m]))
+      ) < on() group_left ( codex_serena_business_success_baseline * 0.98 )
+    for: 15m
+    labels:
+      severity: warning
+      owner: codex-serena
+    annotations:
+      summary: Serena 业务成功率下降（15m）
+      description: 成功率低于基线 2%，持续 15 分钟，请人工观察与干预。
+

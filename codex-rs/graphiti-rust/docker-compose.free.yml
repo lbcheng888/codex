@@ -1,0 +1,158 @@
+# Docker Compose for Graphiti Rust with Free Providers
+# This setup provides a complete free environment for running Graphiti
+
+version: '3.8'
+
+services:
+  # Neo4j database
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: graphiti-neo4j
+    ports:
+      - "7474:7474"  # Web interface
+      - "7687:7687"  # Bolt protocol
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:7474"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Ollama for local LLM inference
+  ollama:
+    image: ollama/ollama:latest
+    container_name: graphiti-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Uncomment for GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # Model initialization service
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: graphiti-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: >
+      sh -c "
+        echo 'Waiting for Ollama to be ready...' &&
+        sleep 10 &&
+        echo 'Pulling LLM model...' &&
+        ollama pull llama3.2:latest &&
+        echo 'Pulling embedding model...' &&
+        ollama pull nomic-embed-text:latest &&
+        echo 'Models ready!'
+      "
+    restart: "no"
+
+  # Local embedding server
+  embedding-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.embeddings
+    container_name: graphiti-embeddings
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Uncomment for GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # Graphiti MCP server
+  graphiti:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: graphiti-server
+    ports:
+      - "8080:8080"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      embedding-server:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    environment:
+      # Free provider configuration
+      - LLM_PROVIDER=ollama
+      - LLM_MODEL=llama3.2:latest
+      - EMBEDDING_PROVIDER=local
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      
+      # Connection settings
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=password
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - EMBEDDING_BASE_URL=http://embedding-server:8000
+      
+      # Optional: Add your free API keys for fallback
+      # - GROQ_API_KEY=your-groq-key
+      # - HUGGINGFACE_API_KEY=your-hf-key
+    volumes:
+      - ./config.free.toml:/app/config.toml:ro
+      - graphiti_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  ollama_data:
+    driver: local
+  graphiti_data:
+    driver: local
+
+networks:
+  default:
+    name: graphiti-free-network

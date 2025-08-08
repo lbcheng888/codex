@@ -1,0 +1,13 @@
+[project]
+name = "demo-tools"
+root = "."
+
+[logging]
+level = "info"
+
+[tools.echo]
+kind = "process"
+cmd = "/bin/echo"
+args = ["hello-from-serena"]
+timeout_ms = 2000
+

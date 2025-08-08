@@ -1,0 +1,45 @@
+# Development Dockerfile with hot reload support
+
+FROM rust:1.80-slim as development
+
+# Install development dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    curl \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install cargo-watch for hot reload
+RUN cargo install cargo-watch
+
+# Create app directory
+WORKDIR /app
+
+# Copy manifests for dependency caching
+COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml ./
+COPY crates/ ./crates/
+
+# Build dependencies
+RUN cargo build --bin graphiti-mcp-server
+
+# Copy source code
+COPY . .
+
+# Create data directories
+RUN mkdir -p /var/lib/graphiti/search /var/lib/graphiti/vectors /var/lib/graphiti/data
+
+# Set environment variables for development
+ENV RUST_LOG=debug,graphiti=trace \
+    RUST_BACKTRACE=1 \
+    CARGO_INCREMENTAL=1 \
+    SEARCH_INDEX_PATH=/var/lib/graphiti/search \
+    VECTOR_INDEX_PATH=/var/lib/graphiti/vectors
+
+# Expose port
+EXPOSE 8080
+
+# Default command for development (can be overridden)
+CMD ["cargo", "watch", "-x", "run --bin graphiti-mcp-server"]

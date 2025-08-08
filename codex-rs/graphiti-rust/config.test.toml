@@ -1,0 +1,35 @@
+[server]
+host = "0.0.0.0"
+port = 8092
+
+# 跳过 LLM 和 embedding 的测试配置
+[llm]
+provider = "Ollama"
+base_url = "http://localhost:11434"
+model = "llama3.1:8b"
+temperature = 0.3
+max_retries = 1
+
+[embedder]
+provider = "huggingface"
+api_key = ""
+model = "Qwen/Qwen3-Embedding-8B"
+dimension = 4096
+batch_size = 1
+timeout = 10
+
+# CozoDB 图数据库配置
+[cozo]
+engine = "mem"
+path = "./data/graphiti-test.db"
+options = {}
+
+# Graphiti 配置 - 跳过复杂处理
+[graphiti]
+name = "test"
+enable_deduplication = false
+min_entity_confidence = 0.5
+min_relationship_confidence = 0.5
+max_context_window = 1000
+generate_embeddings = false
+skip_entity_extraction = true

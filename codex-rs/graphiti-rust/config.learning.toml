@@ -1,0 +1,123 @@
+# Learning Detection and Notification Configuration
+# 学习检测和通知配置
+
+# Enable the learning detection system
+# 启用学习检测系统
+enabled = true
+
+[detector]
+# Minimum confidence threshold for new entity detection
+# 新实体检测的最小置信度阈值
+entity_novelty_threshold = 0.7
+
+# Minimum confidence for relationship pattern detection
+# 关系模式检测的最小置信度
+relationship_novelty_threshold = 0.6
+
+# Enable anomaly detection
+# 启用异常检测
+enable_anomaly_detection = true
+
+# Enable conceptual breakthrough detection
+# 启用概念突破检测
+enable_breakthrough_detection = true
+
+# Maximum events per analysis to prevent spam
+# 每次分析的最大事件数，防止垃圾信息
+max_events_per_analysis = 5
+
+# Minimum time between similar events (seconds)
+# 类似事件之间的最小时间间隔（秒）
+deduplication_window_seconds = 300
+
+[notifications]
+# Enable notifications
+# 启用通知
+enabled = true
+
+# Maximum number of notifications to keep in history
+# 保留在历史记录中的最大通知数
+max_history = 100
+
+# Minimum notification level to display ("Info", "Success", "Warning", "Critical")
+# 显示的最小通知级别
+min_level = "Info"
+
+# Auto-dismiss notifications after this many seconds (null = never)
+# 自动关闭通知的秒数（null = 永不关闭）
+auto_dismiss_seconds = 300
+
+# Group similar notifications
+# 分组相似通知
+group_similar = true
+
+# Maximum notifications per minute (rate limiting)
+# 每分钟最大通知数（速率限制）
+max_per_minute = 10
+
+# Enable sound notifications
+# 启用声音通知
+enable_sound = false
+
+# Enable desktop notifications (if available)
+# 启用桌面通知（如果可用）
+enable_desktop_notifications = false
+
+[performance]
+# Maximum concurrent learning analyses
+# 最大并发学习分析数
+max_concurrent_analyses = 4
+
+# Analysis timeout in seconds
+# 分析超时时间（秒）
+analysis_timeout_seconds = 30
+
+# Enable caching of analysis results
+# 启用分析结果缓存
+enable_caching = true
+
+# Cache size (number of entries)
+# 缓存大小（条目数）
+cache_size = 1000
+
+# Background cleanup interval in seconds
+# 后台清理间隔（秒）
+cleanup_interval_seconds = 300
+
+[language_settings]
+# Supported languages for code pattern detection
+# 支持的代码模式检测语言
+supported_languages = [
+    "rust",
+    "python",
+    "javascript", 
+    "typescript",
+    "java",
+    "cpp",
+    "c",
+    "go",
+    "swift",
+    "kotlin"
+]
+
+# Language-specific pattern confidence thresholds
+# 特定语言的模式置信度阈值
+[language_settings.language_thresholds]
+rust = 0.8
+python = 0.7
+javascript = 0.7
+typescript = 0.75
+java = 0.75
+cpp = 0.8
+c = 0.8
+go = 0.75
+swift = 0.75
+kotlin = 0.75
+
+# Enable multilingual entity detection (Chinese/English)
+# 启用多语言实体检测（中英文）
+enable_multilingual = true
+
+# Preferred language for notifications ("zh-CN", "en-US")
+# 通知的首选语言
+notification_language = "zh-CN"

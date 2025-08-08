@@ -1,0 +1,40 @@
+# 特性开关示例配置（支持灰度与回退）
+# 将此文件复制为你的特性名，例如 feature_x.yaml
+
+feature: example_feature
+owner: team-foo@example.com
+stage: alpha # alpha | beta | default
+
+# Kill-Switch：紧急全量关闭
+kill_switch: false
+
+# 灰度策略：
+# - by_percentage: 基于流量百分比放量
+# - by_users: 基于用户名单放量（Beta 邀请）
+rollout:
+  strategy: by_percentage
+  percentage: 5       # 5,10,25,50,100
+  users: []           # 如果 strategy=by_users，则填入受邀用户ID
+
+# 环境覆盖：允许在不同环境覆盖默认行为
+env_overrides:
+  dev:
+    log_level: debug
+    rollout:
+      strategy: by_users
+      users: ["dev1", "dev2"]
+  staging:
+    log_level: info
+    rollout:
+      strategy: by_percentage
+      percentage: 10
+  prod:
+    log_level: warn
+
+# 自动回退联动：由监控告警控制
+# action: scale_down（缩量）| disable_beta（关闭Beta）| kill_switch（紧急关闭）
+rollback_policy:
+  critical_alert_action: scale_down
+  cooldown_seconds: 900   # 15 分钟，避免震荡
+  min_safe_percentage: 5  # 缩量下限
+

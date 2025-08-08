@@ -1,0 +1,32 @@
+[package]
+name = "serena-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serena-core = { path = "../serena-core" }
+serena-lsp = { path = "../serena-lsp" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+aho-corasick = { workspace = true }
+regex-syntax = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+sqlx = { workspace = true }
+once_cell = { workspace = true }
+walkdir = { workspace = true }
+ignore = { workspace = true }
+globset = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }

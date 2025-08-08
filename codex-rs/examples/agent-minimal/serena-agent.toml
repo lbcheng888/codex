@@ -1,0 +1,15 @@
+[agent]
+name = "demo-agent"
+policy = "sequential"
+
+[tools]
+allow = ["echo"]
+
+[tools.echo]
+kind = "process"
+cmd = "/bin/echo"
+args = ["hello-from-agent"]
+
+[logging]
+level = "info"
+

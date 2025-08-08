@@ -1,0 +1,9 @@
+# Serena 上游固定提交
+# 使用 git SHA 固定当前集成所基于的上游状态，并记录变更说明。
+# 变更时请通过 docs/release/step23_upstream_sync.md 的流程，并在 PR 里一并更新。
+
+# 示例：
+# 8f4a1d2 2025-07-20 upgrade: sync up to upstream feature-X; perf +3%, minor API change Y
+
+FILL_ME_SHA 1970-01-01 init: initial pin
+

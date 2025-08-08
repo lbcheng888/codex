@@ -1,0 +1,35 @@
+[server]
+host = "0.0.0.0"
+port = 8091
+
+# 完全免费的 LLM 配置
+[llm]
+provider = "Ollama"                    # 本地免费 LLM
+base_url = "http://localhost:11434"
+model = "llama3.1:8b"
+temperature = 0.3
+max_retries = 3
+
+# 免费嵌入配置 (使用本地 Ollama 嵌入)
+[embedder]
+provider = "ollama"                    # 使用本地 Ollama 嵌入
+api_key = "not-needed-for-ollama"      # Ollama 不需要 API 密钥，占位符
+model = "nomic-embed-text"             # 轻量级嵌入模型 (768维度)
+dimension = 768                        # nomic-embed-text 的维度
+batch_size = 32                        # 本地模型可以使用更大批次
+timeout = 30                           # 本地模型响应更快
+
+# CozoDB 图数据库配置 (纯 Rust 实现，支持关系-图-向量混合查询)
+[cozo]
+engine = "mem"                         # 内存模式，快速开发和测试 (也可用 "sqlite")
+path = "/var/lib/graphiti/cozo/graphiti-free.db"  # SQLite 模式的数据库文件路径
+options = {}
+
+# Graphiti 配置
+[graphiti]
+name = "default"
+enable_deduplication = true
+min_entity_confidence = 0.7
+min_relationship_confidence = 0.6
+max_context_window = 4000
+generate_embeddings = true

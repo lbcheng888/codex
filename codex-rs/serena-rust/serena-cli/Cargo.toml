@@ -1,0 +1,28 @@
+[package]
+name = "serena-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "serena-cli"
+path = "src/main.rs"
+
+# 兼容别名二进制，与 start-mcp-server 子命令等价
+[[bin]]
+name = "serena-mcp-server"
+path = "src/bin/serena-mcp-server.rs"
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+serena-core = { path = "../serena-core" }
+serena-config = { path = "../serena-config" }
+serena-mcp = { path = "../serena-mcp" }
+serena-tools = { path = "../serena-tools" }
+
+[dev-dependencies]
+trycmd = "0.15"

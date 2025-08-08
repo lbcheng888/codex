@@ -1,0 +1,43 @@
+[package]
+name = "serena-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+walkdir = { workspace = true }
+ignore = { workspace = true }
+
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+criterion = { version = "0.5", features = ["plotters"] }
+sysinfo = { version = "0.31", features = ["multithread"] }
+os_pipe = "1.1"
+
+serena-mcp = { path = "../serena-mcp" }
+serena-tools = { path = "../serena-tools" }
+serena-lsp = { path = "../serena-lsp" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["plotters"] }
+
+[[bench]]
+name = "micro_tool_overhead"
+harness = false
+
+[[bench]]
+name = "micro_serde_zero_copy"
+harness = false
+
+[[bench]]
+name = "micro_lsp_latency"
+harness = false
+
+[[bench]]
+name = "macro_repo_transform"
+harness = false
