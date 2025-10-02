@@ -1837,6 +1837,25 @@ pub(crate) async fn run_task(
             }
             Err(e) => {
                 info!("Turn error: {e:#}");
+                if let CodexErr::Stream(msg, _) = &e
+                    && is_context_window_exceeded_error(msg)
+                {
+                    if auto_compact_recently_attempted {
+                        let event = Event {
+                            id: sub_id.clone(),
+                            msg: EventMsg::Error(ErrorEvent {
+                                message: "Conversation is still above the model's context window after automatic summarization. Please trim your input or start a new session.".to_string(),
+                            }),
+                        };
+                        sess.send_event(event).await;
+                        break;
+                    } else {
+                        auto_compact_recently_attempted = true;
+                        compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
+                        continue;
+                    }
+                }
+
                 let event = Event {
                     id: sub_id.clone(),
                     msg: EventMsg::Error(ErrorEvent {
@@ -1960,6 +1979,13 @@ async fn run_turn(
     }
 }
 
+fn is_context_window_exceeded_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("context window")
+        || lower.contains("maximum number of tokens")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("maximum context length")
+}
 /// When the model is prompted, it returns a stream of events. Some of these
 /// events map to a `ResponseItem`. A `ResponseItem` may need to be
 /// "handled" such that it produces a `ResponseInputItem` that needs to be
