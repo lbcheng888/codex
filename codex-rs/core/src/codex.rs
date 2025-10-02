@@ -979,13 +979,24 @@ impl Session {
     }
 
     async fn notify_stream_error(&self, sub_id: &str, message: impl Into<String>) {
+        let message = message.into();
+        let should_emit = {
+            let mut state = self.state.lock().await;
+            state.should_emit_stream_error(sub_id, &message)
+        };
+        if !should_emit {
+            return;
+        }
         let event = Event {
             id: sub_id.to_string(),
-            msg: EventMsg::StreamError(StreamErrorEvent {
-                message: message.into(),
-            }),
+            msg: EventMsg::StreamError(StreamErrorEvent { message }),
         };
         self.send_event(event).await;
+    }
+
+    async fn clear_stream_error(&self, sub_id: &str) {
+        let mut state = self.state.lock().await;
+        state.clear_stream_error(sub_id);
     }
 
     /// Build the full turn input by concatenating the current conversation
@@ -1815,6 +1826,12 @@ pub(crate) async fn run_task(
                         break;
                     }
                     auto_compact_recently_attempted = true;
+                    sess
+                        .notify_background_event(
+                            &sub_id,
+                            "Conversation exceeded the token limit; running automatic summarization and retrying…",
+                        )
+                        .await;
                     compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
                     continue;
                 }
@@ -1851,7 +1868,14 @@ pub(crate) async fn run_task(
                         break;
                     } else {
                         auto_compact_recently_attempted = true;
-                        compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
+                        sess
+                            .notify_background_event(
+                                &sub_id,
+                                "Conversation exceeded the model's context window; running automatic summarization and retrying…",
+                            )
+                            .await;
+                        compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone())
+                            .await;
                         continue;
                     }
                 }
@@ -1868,6 +1892,8 @@ pub(crate) async fn run_task(
             }
         }
     }
+
+    sess.clear_stream_error(&sub_id).await;
 
     // If this was a review thread and we have a final assistant message,
     // try to parse it as a ReviewOutput.
@@ -1947,6 +1973,13 @@ async fn run_turn(
             }
             Err(CodexErr::UsageNotIncluded) => return Err(CodexErr::UsageNotIncluded),
             Err(e) => {
+                // Context window errors are not transient; propagating them allows the
+                // caller to trigger auto-compaction instead of retrying the stream.
+                if let CodexErr::Stream(msg, _) = &e
+                    && is_context_window_exceeded_error(msg)
+                {
+                    return Err(e);
+                }
                 // Use the configured provider-specific stream retry budget.
                 let max_retries = turn_context.client.get_provider().stream_max_retries();
                 if retries < max_retries {
@@ -1964,9 +1997,7 @@ async fn run_turn(
                     // at a seemingly frozen screen.
                     sess.notify_stream_error(
                         &sub_id,
-                        format!(
-                            "stream error: {e}; retrying {retries}/{max_retries} in {delay:?}…"
-                        ),
+                        format!("stream error: {e}; retrying automatically…"),
                     )
                     .await;
 
