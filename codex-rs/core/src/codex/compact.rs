@@ -1,8 +1,10 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::Session;
 use super::TurnContext;
 use super::get_last_assistant_message_from_turn;
+use super::is_context_window_exceeded_error;
 use crate::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::error::CodexErr;
@@ -20,6 +22,8 @@ use crate::truncate::truncate_middle;
 use crate::util::backoff;
 use askama::Template;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RolloutItem;
@@ -27,6 +31,11 @@ use futures::prelude::*;
 
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../../templates/compact/prompt.md");
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+const FALLBACK_SUMMARY_TEXT: &str =
+    "Summary unavailable: older turns were truncated after exceeding the model's context window.";
+const COMPACT_PROMPT_BUDGET_PERCENT: u64 = 80;
+
+const MESSAGE_METADATA_TOKEN_ESTIMATE: u64 = 8;
 
 #[derive(Template)]
 #[template(path = "compact/history_bridge.md", escape = "none")]
@@ -70,9 +79,12 @@ async fn run_compact_task_inner(
     input: Vec<InputItem>,
 ) {
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-    let turn_input = sess
-        .turn_input_with_history(vec![initial_input_for_turn.clone().into()])
-        .await;
+    let turn_input = build_compact_prompt_input(
+        sess.as_ref(),
+        turn_context.as_ref(),
+        initial_input_for_turn.clone(),
+    )
+    .await;
 
     let prompt = Prompt {
         input: turn_input,
@@ -81,6 +93,7 @@ async fn run_compact_task_inner(
 
     let max_retries = turn_context.client.get_provider().stream_max_retries();
     let mut retries = 0;
+    let mut summary_override: Option<String> = None;
 
     let rollout_item = RolloutItem::TurnContext(TurnContextItem {
         cwd: turn_context.cwd.clone(),
@@ -97,11 +110,17 @@ async fn run_compact_task_inner(
             drain_to_completed(&sess, turn_context.as_ref(), &sub_id, &prompt).await;
 
         match attempt_result {
-            Ok(()) => {
+            Ok(()) => break,
+            Err(CodexErr::Interrupted) => return,
+            Err(CodexErr::Stream(message, _)) if is_context_window_exceeded_error(&message) => {
+                sess
+                    .notify_background_event(
+                        &sub_id,
+                        "Automatic summarization failed because the conversation already exceeded the model's context window. Trimming older turns and continuing without a summary…",
+                    )
+                    .await;
+                summary_override = Some(FALLBACK_SUMMARY_TEXT.to_string());
                 break;
-            }
-            Err(CodexErr::Interrupted) => {
-                return;
             }
             Err(e) => {
                 if retries < max_retries {
@@ -114,22 +133,23 @@ async fn run_compact_task_inner(
                     .await;
                     tokio::time::sleep(delay).await;
                     continue;
-                } else {
-                    let event = Event {
-                        id: sub_id.clone(),
-                        msg: EventMsg::Error(ErrorEvent {
-                            message: e.to_string(),
-                        }),
-                    };
-                    sess.send_event(event).await;
-                    return;
                 }
+                let event = Event {
+                    id: sub_id.clone(),
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: e.to_string(),
+                    }),
+                };
+                sess.send_event(event).await;
+                return;
             }
         }
     }
 
     let history_snapshot = sess.history_snapshot().await;
-    let summary_text = get_last_assistant_message_from_turn(&history_snapshot).unwrap_or_default();
+    let summary_text = summary_override.unwrap_or_else(|| {
+        get_last_assistant_message_from_turn(&history_snapshot).unwrap_or_default()
+    });
     let user_messages = collect_user_messages(&history_snapshot);
     let initial_context = sess.build_initial_context(turn_context.as_ref());
     let new_history = build_compacted_history(initial_context, &user_messages, &summary_text);
@@ -186,6 +206,239 @@ pub fn is_session_prefix_message(text: &str) -> bool {
         InputMessageKind::from(("user", text)),
         InputMessageKind::UserInstructions | InputMessageKind::EnvironmentContext
     )
+}
+
+struct TruncationSummary {
+    dropped_count: usize,
+    dropped_tokens: u64,
+}
+
+async fn build_compact_prompt_input(
+    sess: &Session,
+    turn_context: &TurnContext,
+    new_input: ResponseInputItem,
+) -> Vec<ResponseItem> {
+    let mut history = sess.history_snapshot().await;
+    let mut truncation_summary: Option<TruncationSummary> = None;
+    let new_input_item: ResponseItem = new_input.clone().into();
+    let new_input_tokens = approximate_tokens_for_response_item(&new_input_item);
+
+    if let Some(budget) = compute_compaction_budget(
+        turn_context.client.get_model_context_window(),
+        turn_context.client.get_auto_compact_token_limit(),
+    ) {
+        if budget <= new_input_tokens {
+            let dropped_tokens = history
+                .iter()
+                .map(approximate_tokens_for_response_item)
+                .sum();
+            let dropped_count = history.len();
+            history.clear();
+            if dropped_tokens > 0 {
+                truncation_summary = Some(TruncationSummary {
+                    dropped_count,
+                    dropped_tokens,
+                });
+            }
+        } else {
+            let history_budget = budget - new_input_tokens;
+            let total_history_tokens = history
+                .iter()
+                .map(approximate_tokens_for_response_item)
+                .sum::<u64>();
+            if total_history_tokens > history_budget {
+                let (trimmed, summary) = trim_history_to_budget(history, history_budget);
+                history = trimmed;
+                truncation_summary = summary;
+            }
+        }
+    }
+
+    if let Some(summary) = truncation_summary {
+        if summary.dropped_count > 0 || summary.dropped_tokens > 0 {
+            history.push(make_truncation_notice(&summary));
+        }
+    }
+
+    history.push(new_input.into());
+    history
+}
+
+fn compute_compaction_budget(context_window: Option<u64>, auto_limit: Option<i64>) -> Option<u64> {
+    let window =
+        context_window.or_else(|| auto_limit.and_then(|limit| (limit > 0).then_some(limit as u64)));
+    window.map(|window| window.saturating_mul(COMPACT_PROMPT_BUDGET_PERCENT) / 100)
+}
+
+fn trim_history_to_budget(
+    history: Vec<ResponseItem>,
+    budget_tokens: u64,
+) -> (Vec<ResponseItem>, Option<TruncationSummary>) {
+    if budget_tokens == 0 {
+        let dropped_tokens = history
+            .iter()
+            .map(approximate_tokens_for_response_item)
+            .sum();
+        return (
+            Vec::new(),
+            Some(TruncationSummary {
+                dropped_count: history.len(),
+                dropped_tokens,
+            }),
+        );
+    }
+
+    let mut prefix: Vec<ResponseItem> = Vec::new();
+    let mut prefix_tokens: u64 = 0;
+    let mut candidates: VecDeque<(ResponseItem, u64)> = VecDeque::new();
+    for item in history {
+        if is_prefix_response_item(&item) {
+            let tokens = approximate_tokens_for_response_item(&item);
+            prefix_tokens = prefix_tokens.saturating_add(tokens);
+            prefix.push(item);
+        } else {
+            let tokens = approximate_tokens_for_response_item(&item);
+            candidates.push_back((item, tokens));
+        }
+    }
+
+    let mut total_tokens =
+        prefix_tokens + candidates.iter().map(|(_, tokens)| *tokens).sum::<u64>();
+    let mut dropped_count = 0usize;
+    let mut dropped_tokens = 0u64;
+
+    while total_tokens > budget_tokens {
+        if let Some((_, tokens)) = candidates.pop_front() {
+            dropped_count += 1;
+            dropped_tokens = dropped_tokens.saturating_add(tokens);
+            total_tokens = total_tokens.saturating_sub(tokens);
+        } else {
+            break;
+        }
+    }
+
+    let mut trimmed = prefix;
+    trimmed.extend(candidates.into_iter().map(|(item, _)| item));
+
+    let summary = if dropped_count > 0 {
+        Some(TruncationSummary {
+            dropped_count,
+            dropped_tokens,
+        })
+    } else {
+        None
+    };
+
+    (trimmed, summary)
+}
+
+fn make_truncation_notice(summary: &TruncationSummary) -> ResponseItem {
+    let text = format!(
+        "Automatic compaction trimmed {} message(s) (~{} tokens) of older context to stay within the model's window. Use the remaining turns and summary below to recover any important details.",
+        summary.dropped_count, summary.dropped_tokens
+    );
+    ResponseItem::Message {
+        id: None,
+        role: "system".to_string(),
+        content: vec![ContentItem::InputText { text }],
+    }
+}
+
+fn is_prefix_response_item(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::Message { role, content, .. } if role == "user" => {
+            content_items_to_text(content)
+                .map(|text| is_session_prefix_message(&text))
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn approximate_tokens_for_response_item(item: &ResponseItem) -> u64 {
+    match item {
+        ResponseItem::Message { content, .. } => content
+            .iter()
+            .map(approximate_tokens_for_content_item)
+            .sum::<u64>()
+            .saturating_add(MESSAGE_METADATA_TOKEN_ESTIMATE),
+        ResponseItem::Reasoning {
+            summary, content, ..
+        } => {
+            let summary_tokens = summary
+                .iter()
+                .map(approximate_tokens_for_reasoning_summary)
+                .sum::<u64>();
+            let content_tokens = content
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(approximate_tokens_for_reasoning_content)
+                        .sum()
+                })
+                .unwrap_or(0);
+            summary_tokens
+                .saturating_add(content_tokens)
+                .saturating_add(MESSAGE_METADATA_TOKEN_ESTIMATE)
+        }
+        ResponseItem::FunctionCall {
+            name, arguments, ..
+        } => {
+            approximate_tokens_for_text(name)
+                + approximate_tokens_for_text(arguments)
+                + MESSAGE_METADATA_TOKEN_ESTIMATE
+        }
+        ResponseItem::FunctionCallOutput { output, .. } => {
+            approximate_tokens_for_text(&output.content)
+                .saturating_add(MESSAGE_METADATA_TOKEN_ESTIMATE)
+        }
+        ResponseItem::CustomToolCall { name, input, .. } => {
+            approximate_tokens_for_text(name)
+                + approximate_tokens_for_text(input)
+                + MESSAGE_METADATA_TOKEN_ESTIMATE
+        }
+        ResponseItem::CustomToolCallOutput { output, .. } => {
+            approximate_tokens_for_text(output) + MESSAGE_METADATA_TOKEN_ESTIMATE
+        }
+        ResponseItem::LocalShellCall { action, .. } => approximate_tokens_for_serialized(action)
+            .saturating_add(MESSAGE_METADATA_TOKEN_ESTIMATE),
+        ResponseItem::WebSearchCall { action, .. } => approximate_tokens_for_serialized(action)
+            .saturating_add(MESSAGE_METADATA_TOKEN_ESTIMATE),
+        ResponseItem::Other => MESSAGE_METADATA_TOKEN_ESTIMATE,
+    }
+}
+
+fn approximate_tokens_for_content_item(item: &ContentItem) -> u64 {
+    match item {
+        ContentItem::InputText { text }
+        | ContentItem::OutputText { text }
+        | ContentItem::InputImage { image_url: text } => approximate_tokens_for_text(text),
+    }
+}
+
+fn approximate_tokens_for_reasoning_summary(summary: &ReasoningItemReasoningSummary) -> u64 {
+    match summary {
+        ReasoningItemReasoningSummary::SummaryText { text } => approximate_tokens_for_text(text),
+    }
+}
+
+fn approximate_tokens_for_reasoning_content(content: &ReasoningItemContent) -> u64 {
+    match content {
+        ReasoningItemContent::ReasoningText { text } | ReasoningItemContent::Text { text } => {
+            approximate_tokens_for_text(text)
+        }
+    }
+}
+
+fn approximate_tokens_for_serialized<T: serde::Serialize>(value: &T) -> u64 {
+    serde_json::to_string(value)
+        .map(|s| approximate_tokens_for_text(&s))
+        .unwrap_or(0)
+}
+
+fn approximate_tokens_for_text(text: &str) -> u64 {
+    (text.len() as u64).div_ceil(4)
 }
 
 pub(crate) fn build_compacted_history(
@@ -386,5 +639,66 @@ mod tests {
             bridge_text.contains("SUMMARY"),
             "bridge should include the provided summary text"
         );
+    }
+
+    fn user_input(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn trim_history_to_budget_retains_prefix_and_drops_oldest() {
+        let prefix = user_input("<user_instructions>keep</user_instructions>");
+        let first = user_input("first message");
+        let second = user_input("second message");
+        let third = user_input("third message");
+
+        let history = vec![prefix.clone(), first.clone(), second.clone(), third.clone()];
+
+        let prefix_tokens = approximate_tokens_for_response_item(&prefix);
+        let third_tokens = approximate_tokens_for_response_item(&third);
+        let budget = prefix_tokens + third_tokens + 1;
+
+        let (trimmed, summary) = trim_history_to_budget(history, budget);
+
+        assert_eq!(trimmed.first(), Some(&prefix));
+        assert!(!trimmed.contains(&first));
+        assert!(trimmed.contains(&third));
+        assert!(!trimmed.contains(&second));
+
+        let summary = summary.expect("expected truncation summary");
+        assert_eq!(summary.dropped_count, 2);
+        assert!(summary.dropped_tokens > 0);
+    }
+
+    #[test]
+    fn compute_compaction_budget_uses_eighty_percent() {
+        assert_eq!(compute_compaction_budget(None, None), None);
+        assert_eq!(compute_compaction_budget(Some(100), Some(200)), Some(80));
+        assert_eq!(compute_compaction_budget(None, Some(200)), Some(160));
+    }
+
+    #[test]
+    fn make_truncation_notice_emits_system_message() {
+        let summary = TruncationSummary {
+            dropped_count: 3,
+            dropped_tokens: 120,
+        };
+        let notice = make_truncation_notice(&summary);
+
+        match notice {
+            ResponseItem::Message { role, content, .. } => {
+                assert_eq!(role, "system");
+                let rendered = content_items_to_text(&content).unwrap();
+                assert!(rendered.contains("3 message"));
+                assert!(rendered.contains("120 tokens"));
+            }
+            other => panic!("expected system message, found {other:?}"),
+        }
     }
 }

@@ -51,6 +51,12 @@ impl ComposerInput {
         self.inner.set_text_content(String::new());
     }
 
+    /// Replace the composer content with `text`, positioning the cursor at the start.
+    pub fn set_text(&mut self, text: String) {
+        self.inner.set_text_content(text);
+        self.drain_app_events();
+    }
+
     /// Feed a key event into the composer and return a high-level action.
     pub fn input(&mut self, key: KeyEvent) -> ComposerAction {
         let action = match self.inner.handle_key_event(key).0 {

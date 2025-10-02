@@ -9,13 +9,15 @@ use ratatui::text::Span;
 use ratatui::widgets::WidgetRef;
 use std::iter;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
     pub(crate) esc_backtrack_hint: bool,
     pub(crate) use_shift_enter_hint: bool,
     pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<u8>,
+    pub(crate) continuous_paused: bool,
+    pub(crate) continuous_status: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,11 +58,11 @@ pub(crate) fn reset_mode_after_activity(current: FooterMode) -> FooterMode {
     }
 }
 
-pub(crate) fn footer_height(props: FooterProps) -> u16 {
+pub(crate) fn footer_height(props: &FooterProps) -> u16 {
     footer_lines(props).len() as u16
 }
 
-pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
+pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: &FooterProps) {
     let lines = footer_lines(props);
     for (idx, line) in lines.into_iter().enumerate() {
         let y = area.y + idx as u16;
@@ -72,21 +74,31 @@ pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
     }
 }
 
-fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
+fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
     match props.mode {
         FooterMode::CtrlCReminder => vec![ctrl_c_reminder_line(CtrlCReminderState {
             is_task_running: props.is_task_running,
         })],
         FooterMode::ShortcutPrompt => {
             if props.is_task_running {
-                vec![context_window_line(props.context_window_percent)]
+                let mut lines = vec![context_window_line(props.context_window_percent)];
+                if let Some(status) = props.continuous_status.as_ref() {
+                    lines.push(dim_line(indent_text(status)));
+                }
+                lines
             } else {
-                vec![dim_line(indent_text("? for shortcuts"))]
+                let mut lines = Vec::new();
+                if let Some(status) = props.continuous_status.as_ref() {
+                    lines.push(dim_line(indent_text(status)));
+                }
+                lines.push(dim_line(indent_text("? for shortcuts")));
+                lines
             }
         }
         FooterMode::ShortcutOverlay => shortcut_overlay_lines(ShortcutsState {
             use_shift_enter_hint: props.use_shift_enter_hint,
             esc_backtrack_hint: props.esc_backtrack_hint,
+            continuous_paused: props.continuous_paused,
         }),
         FooterMode::EscHint => vec![esc_hint_line(props.esc_backtrack_hint)],
         FooterMode::Empty => Vec::new(),
@@ -102,6 +114,7 @@ struct CtrlCReminderState {
 struct ShortcutsState {
     use_shift_enter_hint: bool,
     esc_backtrack_hint: bool,
+    continuous_paused: bool,
 }
 
 fn ctrl_c_reminder_line(state: CtrlCReminderState) -> Line<'static> {
@@ -131,6 +144,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let mut edit_previous = String::new();
     let mut quit = String::new();
     let mut show_transcript = String::new();
+    let mut continuous_resume = String::new();
+    let mut continuous_pause = String::new();
 
     for descriptor in SHORTCUTS {
         if let Some(text) = descriptor.overlay_entry(state) {
@@ -142,6 +157,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
                 ShortcutId::EditPrevious => edit_previous = text,
                 ShortcutId::Quit => quit = text,
                 ShortcutId::ShowTranscript => show_transcript = text,
+                ShortcutId::ContinuousResume => continuous_resume = text,
+                ShortcutId::ContinuousPause => continuous_pause = text,
             }
         }
     }
@@ -155,6 +172,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
         quit,
         String::new(),
         show_transcript,
+        continuous_resume,
+        continuous_pause,
     ];
 
     build_columns(ordered)
@@ -243,6 +262,8 @@ enum ShortcutId {
     EditPrevious,
     Quit,
     ShowTranscript,
+    ContinuousResume,
+    ContinuousPause,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -264,6 +285,8 @@ enum DisplayCondition {
     Always,
     WhenShiftEnterHint,
     WhenNotShiftEnterHint,
+    WhenContinuousPaused,
+    WhenContinuousRunning,
 }
 
 impl DisplayCondition {
@@ -272,6 +295,8 @@ impl DisplayCondition {
             DisplayCondition::Always => true,
             DisplayCondition::WhenShiftEnterHint => state.use_shift_enter_hint,
             DisplayCondition::WhenNotShiftEnterHint => !state.use_shift_enter_hint,
+            DisplayCondition::WhenContinuousPaused => state.continuous_paused,
+            DisplayCondition::WhenContinuousRunning => !state.continuous_paused,
         }
     }
 }
@@ -391,6 +416,28 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
         prefix: "",
         label: " to view transcript",
     },
+    ShortcutDescriptor {
+        id: ShortcutId::ContinuousResume,
+        bindings: &[ShortcutBinding {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::NONE,
+            overlay_text: "c",
+            condition: DisplayCondition::WhenContinuousPaused,
+        }],
+        prefix: "",
+        label: " 继续连续模式",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ContinuousPause,
+        bindings: &[ShortcutBinding {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::NONE,
+            overlay_text: "p",
+            condition: DisplayCondition::WhenContinuousRunning,
+        }],
+        prefix: "",
+        label: " 暂停连续模式",
+    },
 ];
 
 #[cfg(test)]
@@ -401,12 +448,12 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn snapshot_footer(name: &str, props: FooterProps) {
-        let height = footer_height(props).max(1);
+        let height = footer_height(&props).max(1);
         let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, f.area().width, height);
-                render_footer(area, f.buffer_mut(), props);
+                render_footer(area, f.buffer_mut(), &props);
             })
             .unwrap();
         assert_snapshot!(name, terminal.backend());
@@ -422,6 +469,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -433,6 +482,8 @@ mod tests {
                 use_shift_enter_hint: true,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -444,6 +495,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -455,6 +508,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -466,6 +521,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -477,6 +534,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -488,6 +547,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: Some(72),
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
     }

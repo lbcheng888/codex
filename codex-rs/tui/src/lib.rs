@@ -39,6 +39,8 @@ mod citation_regex;
 mod cli;
 mod clipboard_paste;
 mod color;
+mod continuous_mode;
+mod continuous_runtime;
 pub mod custom_terminal;
 mod diff_render;
 mod exec_cell;
@@ -81,6 +83,7 @@ mod updates;
 use crate::onboarding::TrustDirectorySelection;
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::onboarding::onboarding_screen::run_onboarding_app;
+use crate::resume_picker::ResumeSelection;
 use crate::tui::Tui;
 pub use cli::Cli;
 pub use markdown_render::render_markdown_text;
@@ -417,16 +420,55 @@ async fn run_ratatui_app(
         resume_picker::ResumeSelection::StartFresh
     };
 
-    let Cli { prompt, images, .. } = cli;
+    let Cli {
+        prompt,
+        images,
+        continuous,
+        ..
+    } = cli;
+
+    let mut initial_prompt = prompt;
+    let mut continuous_settings: Option<continuous_mode::ContinuousModeSettings> = None;
+
+    if continuous.enabled {
+        if matches!(resume_selection, ResumeSelection::StartFresh) {
+            match continuous_mode::run_preview(&mut tui, initial_prompt.clone(), &continuous)
+                .await?
+            {
+                continuous_mode::PreviewAction::Start { prompt, settings } => {
+                    let trimmed = prompt.trim().to_string();
+                    initial_prompt = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    };
+                    continuous_settings = Some(settings);
+                }
+                continuous_mode::PreviewAction::Abort => {
+                    restore();
+                    session_log::log_session_end();
+                    return Ok(AppExitInfo {
+                        token_usage: codex_core::protocol::TokenUsage::default(),
+                        conversation_id: None,
+                    });
+                }
+            }
+        } else {
+            let mut settings = continuous_mode::ContinuousModeSettings::from_cli(&continuous);
+            settings.clamp();
+            continuous_settings = Some(settings);
+        }
+    }
 
     let app_result = App::run(
         &mut tui,
         auth_manager,
         config,
         active_profile,
-        prompt,
+        initial_prompt,
         images,
         resume_selection,
+        continuous_settings,
     )
     .await;
 

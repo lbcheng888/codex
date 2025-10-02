@@ -1210,6 +1210,10 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn set_continuous_status(&mut self, paused: bool, status: Option<String>) {
+        self.bottom_pane.set_continuous_status(paused, status);
+    }
+
     fn add_to_history(&mut self, cell: impl HistoryCell + 'static) {
         self.add_boxed_history(Box::new(cell));
     }
