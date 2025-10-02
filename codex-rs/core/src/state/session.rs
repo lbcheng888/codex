@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
+use std::collections::HashSet;
 
 use codex_protocol::models::ResponseItem;
 
@@ -14,6 +15,7 @@ use crate::protocol::TokenUsageInfo;
 /// Persistent, session-scoped state previously stored directly on `Session`.
 #[derive(Default)]
 pub(crate) struct SessionState {
+    pub(crate) approved_commands: HashSet<Vec<String>>,
     pub(crate) history: ConversationHistory,
     pub(crate) token_info: Option<TokenUsageInfo>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
@@ -45,6 +47,15 @@ impl SessionState {
 
     pub(crate) fn replace_history(&mut self, items: Vec<ResponseItem>) {
         self.history.replace(items);
+    }
+
+    // Approved command helpers
+    pub(crate) fn add_approved_command(&mut self, cmd: Vec<String>) {
+        self.approved_commands.insert(cmd);
+    }
+
+    pub(crate) fn approved_commands_ref(&self) -> &HashSet<Vec<String>> {
+        &self.approved_commands
     }
 
     // Token/rate limit helpers
