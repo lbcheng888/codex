@@ -108,7 +108,7 @@ async fn run_compact_task_inner(
 
     loop {
         let attempt_result =
-            drain_to_completed(Arc::clone(&sess), &turn_context, &sub_id, &prompt).await;
+            drain_to_completed(sess.as_ref(), turn_context.as_ref(), &sub_id, &prompt).await;
 
         match attempt_result {
             Ok(()) => break,
@@ -525,13 +525,12 @@ pub(crate) fn build_compacted_history(
 }
 
 async fn drain_to_completed(
-    sess: Arc<Session>,
-    turn_context: &Arc<TurnContext>,
+    sess: &Session,
+    turn_context: &TurnContext,
     sub_id: &str,
     prompt: &Prompt,
 ) -> CodexResult<()> {
-    let ctx = turn_context.as_ref();
-    let mut stream = ctx.client.clone().stream(prompt).await?;
+    let mut stream = turn_context.client.clone().stream(prompt).await?;
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {

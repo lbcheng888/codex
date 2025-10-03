@@ -772,49 +772,22 @@ impl Session {
     }
 
     async fn update_token_usage_info(
-        self: &Arc<Self>,
+        &self,
         sub_id: &str,
-        turn_context: &Arc<TurnContext>,
+        turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
     ) {
-        let mut should_trigger_auto_compact = false;
-        if let Some(token_usage) = token_usage {
-            let context_window = turn_context.client.get_model_context_window().or_else(|| {
-                turn_context
-                    .client
-                    .get_auto_compact_token_limit()
-                    .and_then(|limit| (limit > 0).then_some(limit as u64))
-            });
-            let percent_remaining = context_window
-                .map(|window| token_usage.percent_of_context_window_remaining(window));
-            {
-                let mut state = self.state.lock().await;
-                state.update_token_info_from_usage(token_usage, context_window);
-                if let Some(percent) = percent_remaining {
-                    let is_low = percent <= CONTEXT_REMAINING_AUTO_COMPACT_THRESHOLD;
-                    if state.update_low_context_trigger(is_low) {
-                        should_trigger_auto_compact = is_low;
-                    }
-                } else {
-                    state.update_low_context_trigger(false);
-                }
-            }
-        } else {
+        {
             let mut state = self.state.lock().await;
-            state.update_low_context_trigger(false);
+            if let Some(token_usage) = token_usage {
+                state.update_token_info_from_usage(
+                    token_usage,
+                    turn_context.client.get_model_context_window(),
+                );
+            }
         }
 
         self.send_token_count_event(sub_id).await;
-
-        if should_trigger_auto_compact {
-            self
-                .notify_background_event(
-                    sub_id,
-                    "Conversation exhausted the model's context window; running automatic summarization…",
-                )
-                .await;
-            compact::run_inline_auto_compact_task(Arc::clone(self), Arc::clone(turn_context)).await;
-        }
     }
 
     async fn update_rate_limits(&self, sub_id: &str, new_rate_limits: RateLimitSnapshot) {
@@ -1721,8 +1694,8 @@ pub(crate) async fn run_task(
             })
             .collect();
         match run_turn(
-            Arc::clone(&sess),
-            Arc::clone(&turn_context),
+            sess.as_ref(),
+            turn_context.as_ref(),
             &mut turn_diff_tracker,
             sub_id.clone(),
             turn_input,
@@ -2021,8 +1994,8 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
 }
 
 async fn run_turn(
-    sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    sess: &Session,
+    turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
     input: Vec<ResponseItem>,
@@ -2041,13 +2014,7 @@ async fn run_turn(
 
     let mut retries = 0;
     loop {
-        match try_run_turn(
-            sess.clone(),
-            turn_context.as_ref(),
-            turn_diff_tracker,
-            &sub_id,
-            &prompt,
-        )
+        match try_run_turn(sess, turn_context, turn_diff_tracker, &sub_id, &prompt)
         .await
         {
             Ok(output) => return Ok(output),
@@ -2123,7 +2090,7 @@ struct TurnRunResult {
 }
 
 async fn try_run_turn(
-    sess: Arc<Session>,
+    sess: &Session,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: &str,
@@ -2224,7 +2191,7 @@ async fn try_run_turn(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
                 let response = handle_response_item(
-                    sess.as_ref(),
+                    sess,
                     turn_context,
                     turn_diff_tracker,
                     sub_id,
