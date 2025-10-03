@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -632,7 +631,7 @@ impl ChatWidget {
         if let Some(controller) = self.stream_controller.as_mut() {
             let (cell, is_idle) = controller.on_commit_tick();
             if let Some(cell) = cell {
-                self.bottom_pane.set_task_running(false);
+                self.bottom_pane.hide_status_indicator();
                 self.add_boxed_history(cell);
             }
             if is_idle {
@@ -665,7 +664,7 @@ impl ChatWidget {
 
     fn handle_stream_finished(&mut self) {
         if self.task_complete_pending {
-            self.bottom_pane.set_task_running(false);
+            self.bottom_pane.hide_status_indicator();
             self.task_complete_pending = false;
         }
         // A completed stream indicates non-exec content was just inserted.
@@ -1602,9 +1601,14 @@ impl ChatWidget {
         let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
         let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
 
-        let mut grouped: BTreeMap<&str, Vec<ModelPreset>> = BTreeMap::new();
+        let mut grouped: Vec<(&str, Vec<ModelPreset>)> = Vec::new();
         for preset in presets.into_iter() {
-            grouped.entry(preset.model).or_default().push(preset);
+            if let Some((_, entries)) = grouped.iter_mut().find(|(model, _)| *model == preset.model)
+            {
+                entries.push(preset);
+            } else {
+                grouped.push((preset.model, vec![preset]));
+            }
         }
 
         let mut items: Vec<SelectionItem> = Vec::new();
@@ -1633,7 +1637,7 @@ impl ChatWidget {
                 description,
                 is_current,
                 actions,
-                dismiss_on_select: true,
+                dismiss_on_select: false,
                 ..Default::default()
             });
         }

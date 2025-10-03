@@ -47,6 +47,7 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
 
 fn test_config() -> Config {
@@ -613,6 +614,36 @@ fn alt_up_edits_most_recent_queued_message() {
 }
 
 #[test]
+fn streaming_final_answer_keeps_task_running_state() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.on_task_started();
+    chat.on_agent_message_delta("Final answer line\n".to_string());
+    chat.on_commit_tick();
+
+    assert!(chat.bottom_pane.is_task_running());
+    assert!(chat.bottom_pane.status_widget().is_none());
+
+    chat.bottom_pane
+        .set_composer_text("queued submission".to_string());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(chat.queued_user_messages.len(), 1);
+    assert_eq!(
+        chat.queued_user_messages.front().unwrap().text,
+        "queued submission"
+    );
+    assert!(matches!(op_rx.try_recv(), Err(TryRecvError::Empty)));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    match op_rx.try_recv() {
+        Ok(Op::Interrupt) => {}
+        other => panic!("expected Op::Interrupt, got {other:?}"),
+    }
+    assert!(chat.bottom_pane.ctrl_c_quit_hint_visible());
+}
+
+#[test]
 fn exec_history_cell_shows_working_then_completed() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
 
@@ -993,6 +1024,29 @@ fn model_reasoning_selection_popup_snapshot() {
 
     let popup = render_bottom_popup(&chat, 80);
     assert_snapshot!("model_reasoning_selection_popup", popup);
+}
+
+#[test]
+fn reasoning_popup_escape_returns_to_model_popup() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    chat.config.model = "gpt-5".to_string();
+    chat.open_model_popup();
+
+    let presets = builtin_model_presets(None)
+        .into_iter()
+        .filter(|preset| preset.model == "gpt-5-codex")
+        .collect::<Vec<_>>();
+    chat.open_reasoning_popup("gpt-5-codex".to_string(), presets);
+
+    let before_escape = render_bottom_popup(&chat, 80);
+    assert!(before_escape.contains("Select Reasoning Level"));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    let after_escape = render_bottom_popup(&chat, 80);
+    assert!(after_escape.contains("Select Model"));
+    assert!(!after_escape.contains("Select Reasoning Level"));
 }
 
 #[test]

@@ -3,7 +3,7 @@ name: Issue Deduplicator
 on:
   issues:
     types:
-#      - opened - disabled while testing
+      - opened
       - labeled
 
 jobs:
@@ -48,6 +48,7 @@ jobs:
           prompt_file: .github/prompts/issue-deduplicator.txt
           require_repo_write: false
           codex_version: 0.43.0-alpha.16
+          codex_args: -m gpt-5
 
   comment-on-issue:
     name: Comment with potential duplicates
@@ -73,7 +74,16 @@ jobs:
               return;
             }
 
-            const lines = ['Potential duplicates detected:', ...numbers.map((value) => `- #${value}`)];
+            if (numbers.length === 0) {
+              core.info('Codex reported no potential duplicates.');
+              return;
+            }
+
+            const lines = [
+              'Potential duplicates detected:'
+              ...numbers.map((value) => `- #${value}`),
+              '',
+              '*Powered by [Codex Action](https://github.com/openai/codex-action)*'];
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -86,6 +96,7 @@ jobs:
         if: ${{ always() && github.event.action == 'labeled' && github.event.label.name == 'codex-deduplicate' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh issue edit "${{ github.event.issue.number }}" --remove-label codex-deduplicate || true
           echo "Attempted to remove label: codex-deduplicate"
