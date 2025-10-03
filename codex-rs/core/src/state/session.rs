@@ -1,9 +1,9 @@
 //! Session-wide mutable state.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
-use std::collections::HashSet;
 
 use codex_protocol::models::ResponseItem;
 
@@ -20,6 +20,7 @@ pub(crate) struct SessionState {
     pub(crate) token_info: Option<TokenUsageInfo>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) last_stream_error_by_sub_id: HashMap<String, StreamErrorState>,
+    auto_compact_low_context_triggered: bool,
 }
 
 impl SessionState {
@@ -103,6 +104,20 @@ impl SessionState {
 
     pub(crate) fn clear_stream_error(&mut self, sub_id: &str) {
         self.last_stream_error_by_sub_id.remove(sub_id);
+    }
+
+    pub(crate) fn update_low_context_trigger(&mut self, is_low: bool) -> bool {
+        if is_low {
+            if self.auto_compact_low_context_triggered {
+                false
+            } else {
+                self.auto_compact_low_context_triggered = true;
+                true
+            }
+        } else {
+            self.auto_compact_low_context_triggered = false;
+            false
+        }
     }
 }
 

@@ -772,21 +772,49 @@ impl Session {
     }
 
     async fn update_token_usage_info(
-        &self,
+        self: &Arc<Self>,
         sub_id: &str,
-        turn_context: &TurnContext,
+        turn_context: &Arc<TurnContext>,
         token_usage: Option<&TokenUsage>,
     ) {
-        {
-            let mut state = self.state.lock().await;
-            if let Some(token_usage) = token_usage {
-                state.update_token_info_from_usage(
-                    token_usage,
-                    turn_context.client.get_model_context_window(),
-                );
+        let mut should_trigger_auto_compact = false;
+        if let Some(token_usage) = token_usage {
+            let context_window = turn_context.client.get_model_context_window().or_else(|| {
+                turn_context
+                    .client
+                    .get_auto_compact_token_limit()
+                    .and_then(|limit| (limit > 0).then_some(limit as u64))
+            });
+            let percent_remaining = context_window
+                .map(|window| token_usage.percent_of_context_window_remaining(window));
+            {
+                let mut state = self.state.lock().await;
+                state.update_token_info_from_usage(token_usage, context_window);
+                if let Some(percent) = percent_remaining {
+                    let is_low = percent <= CONTEXT_REMAINING_AUTO_COMPACT_THRESHOLD;
+                    if state.update_low_context_trigger(is_low) {
+                        should_trigger_auto_compact = is_low;
+                    }
+                } else {
+                    state.update_low_context_trigger(false);
+                }
             }
+        } else {
+            let mut state = self.state.lock().await;
+            state.update_low_context_trigger(false);
         }
+
         self.send_token_count_event(sub_id).await;
+
+        if should_trigger_auto_compact {
+            self
+                .notify_background_event(
+                    sub_id,
+                    "Conversation exhausted the model's context window; running automatic summarization…",
+                )
+                .await;
+            compact::run_inline_auto_compact_task(Arc::clone(self), Arc::clone(turn_context)).await;
+        }
     }
 
     async fn update_rate_limits(&self, sub_id: &str, new_rate_limits: RateLimitSnapshot) {
@@ -1693,8 +1721,8 @@ pub(crate) async fn run_task(
             })
             .collect();
         match run_turn(
-            &sess,
-            turn_context.as_ref(),
+            Arc::clone(&sess),
+            Arc::clone(&turn_context),
             &mut turn_diff_tracker,
             sub_id.clone(),
             turn_input,
@@ -1706,6 +1734,16 @@ pub(crate) async fn run_task(
                     processed_items,
                     total_token_usage,
                 } = turn_output;
+                sess.update_token_usage_info(&sub_id, &turn_context, total_token_usage.as_ref())
+                    .await;
+                if let Ok(Some(unified_diff)) = turn_diff_tracker.get_unified_diff() {
+                    let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
+                    let event = Event {
+                        id: sub_id.to_string(),
+                        msg,
+                    };
+                    sess.send_event(event).await;
+                }
                 let auto_compact_limit = turn_context.client.get_auto_compact_token_limit();
                 let limit = auto_compact_limit.unwrap_or(i64::MAX);
                 let total_usage_tokens = total_token_usage
@@ -1723,9 +1761,16 @@ pub(crate) async fn run_task(
                 let context_budget_exhausted = context_remaining_percent
                     .is_some_and(|percent| percent <= CONTEXT_REMAINING_AUTO_COMPACT_THRESHOLD);
                 let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
+                let mut pending_reasoning: Option<ResponseItem> = None;
                 let mut responses = Vec::<ResponseInputItem>::new();
                 for processed_response_item in processed_items {
                     let ProcessedResponseItem { item, response } = processed_response_item;
+                    let is_reasoning = matches!(item, ResponseItem::Reasoning { .. });
+                    if !is_reasoning {
+                        if let Some(reasoning) = pending_reasoning.take() {
+                            items_to_record_in_conversation_history.push(reasoning);
+                        }
+                    }
                     match (&item, &response) {
                         (ResponseItem::Message { role, .. }, None) if role == "assistant" => {
                             // If the model returned a message, we need to record it.
@@ -1799,7 +1844,7 @@ pub(crate) async fn run_task(
                             },
                             None,
                         ) => {
-                            items_to_record_in_conversation_history.push(ResponseItem::Reasoning {
+                            pending_reasoning = Some(ResponseItem::Reasoning {
                                 id: id.clone(),
                                 summary: summary.clone(),
                                 content: content.clone(),
@@ -1813,6 +1858,10 @@ pub(crate) async fn run_task(
                     if let Some(response) = response {
                         responses.push(response);
                     }
+                }
+
+                if let Some(reasoning) = pending_reasoning.take() {
+                    items_to_record_in_conversation_history.push(reasoning);
                 }
 
                 // Only attempt to take the lock if there is something to record.
@@ -1972,8 +2021,8 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
 }
 
 async fn run_turn(
-    sess: &Session,
-    turn_context: &TurnContext,
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
     input: Vec<ResponseItem>,
@@ -1992,7 +2041,15 @@ async fn run_turn(
 
     let mut retries = 0;
     loop {
-        match try_run_turn(sess, turn_context, turn_diff_tracker, &sub_id, &prompt).await {
+        match try_run_turn(
+            sess.clone(),
+            turn_context.as_ref(),
+            turn_diff_tracker,
+            &sub_id,
+            &prompt,
+        )
+        .await
+        {
             Ok(output) => return Ok(output),
             Err(CodexErr::Interrupted) => return Err(CodexErr::Interrupted),
             Err(CodexErr::EnvVar(var)) => return Err(CodexErr::EnvVar(var)),
@@ -2066,7 +2123,7 @@ struct TurnRunResult {
 }
 
 async fn try_run_turn(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: &str,
@@ -2167,7 +2224,7 @@ async fn try_run_turn(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
                 let response = handle_response_item(
-                    sess,
+                    sess.as_ref(),
                     turn_context,
                     turn_diff_tracker,
                     sub_id,
@@ -2194,19 +2251,6 @@ async fn try_run_turn(
                 response_id: _,
                 token_usage,
             } => {
-                sess.update_token_usage_info(sub_id, turn_context, token_usage.as_ref())
-                    .await;
-
-                let unified_diff = turn_diff_tracker.get_unified_diff();
-                if let Ok(Some(unified_diff)) = unified_diff {
-                    let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-                    let event = Event {
-                        id: sub_id.to_string(),
-                        msg,
-                    };
-                    sess.send_event(event).await;
-                }
-
                 let result = TurnRunResult {
                     processed_items: output,
                     total_token_usage: token_usage.clone(),

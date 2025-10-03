@@ -34,6 +34,7 @@ const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 const FALLBACK_SUMMARY_TEXT: &str =
     "Summary unavailable: older turns were truncated after exceeding the model's context window.";
 const COMPACT_PROMPT_BUDGET_PERCENT: u64 = 80;
+const STREAM_CLOSED_BEFORE_COMPLETED: &str = "stream closed before response.completed";
 
 const MESSAGE_METADATA_TOKEN_ESTIMATE: u64 = 8;
 
@@ -107,7 +108,7 @@ async fn run_compact_task_inner(
 
     loop {
         let attempt_result =
-            drain_to_completed(&sess, turn_context.as_ref(), &sub_id, &prompt).await;
+            drain_to_completed(Arc::clone(&sess), &turn_context, &sub_id, &prompt).await;
 
         match attempt_result {
             Ok(()) => break,
@@ -117,6 +118,18 @@ async fn run_compact_task_inner(
                     .notify_background_event(
                         &sub_id,
                         "Automatic summarization failed because the conversation already exceeded the model's context window. Trimming older turns and continuing without a summary…",
+                    )
+                    .await;
+                summary_override = Some(FALLBACK_SUMMARY_TEXT.to_string());
+                break;
+            }
+            Err(CodexErr::Stream(message, _))
+                if message.contains(STREAM_CLOSED_BEFORE_COMPLETED) =>
+            {
+                sess
+                    .notify_background_event(
+                        &sub_id,
+                        "Automatic summarization stream closed unexpectedly. Trimming older turns and continuing with a synthetic summary…",
                     )
                     .await;
                 summary_override = Some(FALLBACK_SUMMARY_TEXT.to_string());
@@ -274,20 +287,6 @@ fn trim_history_to_budget(
     history: Vec<ResponseItem>,
     budget_tokens: u64,
 ) -> (Vec<ResponseItem>, Option<TruncationSummary>) {
-    if budget_tokens == 0 {
-        let dropped_tokens = history
-            .iter()
-            .map(approximate_tokens_for_response_item)
-            .sum();
-        return (
-            Vec::new(),
-            Some(TruncationSummary {
-                dropped_count: history.len(),
-                dropped_tokens,
-            }),
-        );
-    }
-
     let mut prefix: Vec<ResponseItem> = Vec::new();
     let mut prefix_tokens: u64 = 0;
     let mut candidates: VecDeque<(ResponseItem, u64)> = VecDeque::new();
@@ -308,12 +307,21 @@ fn trim_history_to_budget(
     let mut dropped_tokens = 0u64;
 
     while total_tokens > budget_tokens {
-        if let Some((_, tokens)) = candidates.pop_front() {
-            dropped_count += 1;
-            dropped_tokens = dropped_tokens.saturating_add(tokens);
-            total_tokens = total_tokens.saturating_sub(tokens);
-        } else {
+        let Some((item, tokens)) = candidates.pop_front() else {
             break;
+        };
+        dropped_count += 1;
+        dropped_tokens = dropped_tokens.saturating_add(tokens);
+        total_tokens = total_tokens.saturating_sub(tokens);
+
+        if let Some(call_id) = tool_call_id(&item) {
+            drop_following_outputs(
+                &mut candidates,
+                &mut dropped_count,
+                &mut dropped_tokens,
+                &mut total_tokens,
+                &call_id,
+            );
         }
     }
 
@@ -330,6 +338,44 @@ fn trim_history_to_budget(
     };
 
     (trimmed, summary)
+}
+
+fn tool_call_id(item: &ResponseItem) -> Option<String> {
+    match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. }
+        | ResponseItem::FunctionCallOutput { call_id, .. }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.clone()),
+        ResponseItem::LocalShellCall { call_id, .. } => call_id.clone(),
+        _ => None,
+    }
+}
+
+fn drop_following_outputs(
+    candidates: &mut VecDeque<(ResponseItem, u64)>,
+    dropped_count: &mut usize,
+    dropped_tokens: &mut u64,
+    total_tokens: &mut u64,
+    call_id: &str,
+) {
+    while let Some((next_item, _)) = candidates.front() {
+        let should_drop = match next_item {
+            ResponseItem::FunctionCallOutput {
+                call_id: next_id, ..
+            }
+            | ResponseItem::CustomToolCallOutput {
+                call_id: next_id, ..
+            } => next_id == call_id,
+            _ => false,
+        };
+        if !should_drop {
+            break;
+        }
+        let (_, tokens) = candidates.pop_front().unwrap();
+        *dropped_count += 1;
+        *dropped_tokens = dropped_tokens.saturating_add(tokens);
+        *total_tokens = total_tokens.saturating_sub(tokens);
+    }
 }
 
 fn make_truncation_notice(summary: &TruncationSummary) -> ResponseItem {
@@ -479,12 +525,13 @@ pub(crate) fn build_compacted_history(
 }
 
 async fn drain_to_completed(
-    sess: &Session,
-    turn_context: &TurnContext,
+    sess: Arc<Session>,
+    turn_context: &Arc<TurnContext>,
     sub_id: &str,
     prompt: &Prompt,
 ) -> CodexResult<()> {
-    let mut stream = turn_context.client.clone().stream(prompt).await?;
+    let ctx = turn_context.as_ref();
+    let mut stream = ctx.client.clone().stream(prompt).await?;
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -514,6 +561,7 @@ async fn drain_to_completed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::models::FunctionCallOutputPayload;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -651,6 +699,25 @@ mod tests {
         }
     }
 
+    fn function_call(call_id: &str) -> ResponseItem {
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "tool".to_string(),
+            arguments: "{}".to_string(),
+            call_id: call_id.to_string(),
+        }
+    }
+
+    fn function_output(call_id: &str) -> ResponseItem {
+        ResponseItem::FunctionCallOutput {
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload {
+                success: Some(true),
+                content: "ok".to_string(),
+            },
+        }
+    }
+
     #[test]
     fn trim_history_to_budget_retains_prefix_and_drops_oldest() {
         let prefix = user_input("<user_instructions>keep</user_instructions>");
@@ -700,5 +767,21 @@ mod tests {
             }
             other => panic!("expected system message, found {other:?}"),
         }
+    }
+
+    #[test]
+    fn trim_history_to_budget_drops_function_call_pairs() {
+        let call = function_call("call-1");
+        let output = function_output("call-1");
+        let message = user_input("after");
+        let history = vec![call, output, message.clone()];
+
+        let budget = approximate_tokens_for_response_item(&message);
+        let (trimmed, summary) = trim_history_to_budget(history, budget);
+
+        assert_eq!(trimmed, vec![message]);
+        let summary = summary.expect("expected summary");
+        assert_eq!(summary.dropped_count, 2);
+        assert!(summary.dropped_tokens > 0);
     }
 }

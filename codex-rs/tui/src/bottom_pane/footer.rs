@@ -11,6 +11,8 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
+const CONTEXT_CRITICAL_THRESHOLD: u8 = 5;
+
 #[derive(Clone, Debug)]
 pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
@@ -64,7 +66,7 @@ pub(crate) fn footer_height(props: &FooterProps) -> u16 {
     footer_lines(props).len() as u16
 }
 
-pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
+pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: &FooterProps) {
     Paragraph::new(prefix_lines(
         footer_lines(props),
         " ".repeat(FOOTER_INDENT_COLS).into(),
@@ -238,6 +240,10 @@ fn context_window_line(percent: Option<u8>) -> Line<'static> {
         Some(percent) => {
             spans.push(format!("{percent}%").bold());
             spans.push(" context left".dim());
+            if percent <= CONTEXT_CRITICAL_THRESHOLD {
+                spans.push(" ".into());
+                spans.push("(auto-compacting)".yellow().bold());
+            }
         }
         None => {
             spans.push(key_hint::plain(KeyCode::Char('?')).into());
@@ -399,9 +405,7 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
     ShortcutDescriptor {
         id: ShortcutId::ContinuousResume,
         bindings: &[ShortcutBinding {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::NONE,
-            overlay_text: "c",
+            key: key_hint::plain(KeyCode::Char('c')),
             condition: DisplayCondition::WhenContinuousPaused,
         }],
         prefix: "",
@@ -410,15 +414,21 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
     ShortcutDescriptor {
         id: ShortcutId::ContinuousPause,
         bindings: &[ShortcutBinding {
-            code: KeyCode::Char('p'),
-            modifiers: KeyModifiers::NONE,
-            overlay_text: "p",
+            key: key_hint::plain(KeyCode::Char('p')),
             condition: DisplayCondition::WhenContinuousRunning,
         }],
         prefix: "",
         label: " 暂停连续模式",
     },
 ];
+
+fn indent_text(text: &str) -> String {
+    format!("  {text}")
+}
+
+fn dim_line(text: String) -> Line<'static> {
+    Line::from(text).dim()
+}
 
 #[cfg(test)]
 mod tests {
