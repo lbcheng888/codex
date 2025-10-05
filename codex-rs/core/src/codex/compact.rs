@@ -322,6 +322,13 @@ fn trim_history_to_budget(
                 &mut total_tokens,
                 &call_id,
             );
+        } else if matches!(item, ResponseItem::Reasoning { .. }) {
+            drop_following_function_calls(
+                &mut candidates,
+                &mut dropped_count,
+                &mut dropped_tokens,
+                &mut total_tokens,
+            );
         }
     }
 
@@ -375,6 +382,42 @@ fn drop_following_outputs(
         *dropped_count += 1;
         *dropped_tokens = dropped_tokens.saturating_add(tokens);
         *total_tokens = total_tokens.saturating_sub(tokens);
+    }
+}
+
+fn drop_following_function_calls(
+    candidates: &mut VecDeque<(ResponseItem, u64)>,
+    dropped_count: &mut usize,
+    dropped_tokens: &mut u64,
+    total_tokens: &mut u64,
+) {
+    loop {
+        let Some((next_item, _)) = candidates.front() else {
+            break;
+        };
+        let call_id = match next_item {
+            ResponseItem::FunctionCall { call_id, .. }
+            | ResponseItem::CustomToolCall { call_id, .. } => Some(call_id.clone()),
+            ResponseItem::LocalShellCall {
+                call_id: Some(call_id),
+                ..
+            } => Some(call_id.clone()),
+            _ => None,
+        };
+        let Some(call_id) = call_id else {
+            break;
+        };
+        let (_, tokens) = candidates.pop_front().unwrap();
+        *dropped_count += 1;
+        *dropped_tokens = dropped_tokens.saturating_add(tokens);
+        *total_tokens = total_tokens.saturating_sub(tokens);
+        drop_following_outputs(
+            candidates,
+            dropped_count,
+            dropped_tokens,
+            total_tokens,
+            &call_id,
+        );
     }
 }
 

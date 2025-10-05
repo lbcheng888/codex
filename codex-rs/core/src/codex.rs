@@ -1834,8 +1834,10 @@ pub(crate) async fn run_task(
                     }
                 }
 
-                if let Some(reasoning) = pending_reasoning.take() {
-                    items_to_record_in_conversation_history.push(reasoning);
+                if pending_reasoning.take().is_some() {
+                    debug!(
+                        "Dropping trailing reasoning summary without a following message or tool output"
+                    );
                 }
 
                 // Only attempt to take the lock if there is something to record.
@@ -2013,7 +2015,16 @@ async fn run_turn(
 
     let mut retries = 0;
     loop {
-        match try_run_turn(sess, turn_context, turn_diff_tracker, &sub_id, &prompt).await {
+        match try_run_turn(
+            &router,
+            sess,
+            turn_context,
+            turn_diff_tracker,
+            &sub_id,
+            &prompt,
+        )
+        .await
+        {
             Ok(output) => return Ok(output),
             Err(CodexErr::Interrupted) => return Err(CodexErr::Interrupted),
             Err(CodexErr::EnvVar(var)) => return Err(CodexErr::EnvVar(var)),
