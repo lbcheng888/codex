@@ -458,6 +458,15 @@ fn merge_resume_cli_flags(interactive: &mut TuiCli, resume_cli: TuiCli) {
     if let Some(prompt) = resume_cli.prompt {
         interactive.prompt = Some(prompt);
     }
+    if resume_cli.continuous.enabled {
+        interactive.continuous.enabled = true;
+    }
+    if let Some(steps) = resume_cli.continuous.max_steps {
+        interactive.continuous.max_steps = Some(steps);
+    }
+    if let Some(confirm) = resume_cli.continuous.confirm_on_breakpoint {
+        interactive.continuous.confirm_on_breakpoint = Some(confirm);
+    }
 
     interactive
         .config_overrides
@@ -649,5 +658,26 @@ mod tests {
         assert!(interactive.resume_picker);
         assert!(!interactive.resume_last);
         assert_eq!(interactive.resume_session_id, None);
+    }
+
+    #[test]
+    fn resume_merges_continuous_settings() {
+        let interactive = finalize_from_args(
+            [
+                "codex",
+                "resume",
+                "sid",
+                "--continuous",
+                "--max-steps",
+                "12",
+                "--confirm-on-breakpoint",
+                "false",
+            ]
+            .as_ref(),
+        );
+
+        assert!(interactive.continuous.enabled);
+        assert_eq!(interactive.continuous.max_steps, Some(12));
+        assert_eq!(interactive.continuous.confirm_on_breakpoint, Some(false));
     }
 }

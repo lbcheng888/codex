@@ -106,6 +106,8 @@ use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::format_exec_output_str;
 use crate::tools::parallel::ToolCallRuntime;
+
+const CONTEXT_REMAINING_AUTO_COMPACT_THRESHOLD: u8 = 0;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::unified_exec::UnifiedExecSessionManager;
 use crate::user_instructions::UserInstructions;
@@ -765,6 +767,7 @@ impl Session {
                 );
             }
         }
+
         self.send_token_count_event(sub_id).await;
     }
 
@@ -1002,13 +1005,24 @@ impl Session {
     }
 
     async fn notify_stream_error(&self, sub_id: &str, message: impl Into<String>) {
+        let message = message.into();
+        let should_emit = {
+            let mut state = self.state.lock().await;
+            state.should_emit_stream_error(sub_id, &message)
+        };
+        if !should_emit {
+            return;
+        }
         let event = Event {
             id: sub_id.to_string(),
-            msg: EventMsg::StreamError(StreamErrorEvent {
-                message: message.into(),
-            }),
+            msg: EventMsg::StreamError(StreamErrorEvent { message }),
         };
         self.send_event(event).await;
+    }
+
+    async fn clear_stream_error(&self, sub_id: &str) {
+        let mut state = self.state.lock().await;
+        state.clear_stream_error(sub_id);
     }
 
     /// Build the full turn input by concatenating the current conversation
@@ -1737,9 +1751,9 @@ pub(crate) async fn run_task(
             })
             .collect();
         match run_turn(
-            Arc::clone(&sess),
-            Arc::clone(&turn_context),
-            Arc::clone(&turn_diff_tracker),
+            sess.as_ref(),
+            turn_context.as_ref(),
+            &mut turn_diff_tracker,
             sub_id.clone(),
             turn_input,
         )
@@ -1750,11 +1764,18 @@ pub(crate) async fn run_task(
                     processed_items,
                     total_token_usage,
                 } = turn_output;
-                let limit = turn_context
-                    .client
-                    .get_auto_compact_token_limit()
-                    .unwrap_or(i64::MAX);
-                let context_window = turn_context.client.get_model_context_window();
+                sess.update_token_usage_info(&sub_id, &turn_context, total_token_usage.as_ref())
+                    .await;
+                if let Ok(Some(unified_diff)) = turn_diff_tracker.get_unified_diff() {
+                    let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
+                    let event = Event {
+                        id: sub_id.to_string(),
+                        msg,
+                    };
+                    sess.send_event(event).await;
+                }
+                let auto_compact_limit = turn_context.client.get_auto_compact_token_limit();
+                let limit = auto_compact_limit.unwrap_or(i64::MAX);
                 let total_usage_tokens = total_token_usage
                     .as_ref()
                     .map(TokenUsage::tokens_in_context_window);
@@ -1764,12 +1785,25 @@ pub(crate) async fn run_task(
                 let token_limit_reached = total_usage_tokens
                     .map(|tokens| (tokens as i64) >= limit)
                     .unwrap_or(false);
-                let context_left_critically_low =
-                    context_left_percent.is_some_and(|percent| percent <= 1);
+                let context_window = turn_context.client.get_model_context_window().or_else(|| {
+                    auto_compact_limit.and_then(|value| (value > 0).then_some(value as u64))
+                });
+                let context_remaining_percent = total_token_usage.as_ref().and_then(|usage| {
+                    context_window.map(|window| usage.percent_of_context_window_remaining(window))
+                });
+                let context_budget_exhausted = context_remaining_percent
+                    .is_some_and(|percent| percent <= CONTEXT_REMAINING_AUTO_COMPACT_THRESHOLD);
                 let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
+                let mut pending_reasoning: Option<ResponseItem> = None;
                 let mut responses = Vec::<ResponseInputItem>::new();
                 for processed_response_item in processed_items {
                     let ProcessedResponseItem { item, response } = processed_response_item;
+                    let is_reasoning = matches!(item, ResponseItem::Reasoning { .. });
+                    if !is_reasoning {
+                        if let Some(reasoning) = pending_reasoning.take() {
+                            items_to_record_in_conversation_history.push(reasoning);
+                        }
+                    }
                     match (&item, &response) {
                         (ResponseItem::Message { role, .. }, None) if role == "assistant" => {
                             // If the model returned a message, we need to record it.
@@ -1843,7 +1877,7 @@ pub(crate) async fn run_task(
                             },
                             None,
                         ) => {
-                            items_to_record_in_conversation_history.push(ResponseItem::Reasoning {
+                            pending_reasoning = Some(ResponseItem::Reasoning {
                                 id: id.clone(),
                                 summary: summary.clone(),
                                 content: content.clone(),
@@ -1859,6 +1893,12 @@ pub(crate) async fn run_task(
                     }
                 }
 
+                if pending_reasoning.take().is_some() {
+                    debug!(
+                        "Dropping trailing reasoning summary without a following message or tool output"
+                    );
+                }
+
                 // Only attempt to take the lock if there is something to record.
                 if !items_to_record_in_conversation_history.is_empty() {
                     if is_review_mode {
@@ -1870,22 +1910,22 @@ pub(crate) async fn run_task(
                     }
                 }
 
-                if token_limit_reached || context_left_critically_low {
+                if token_limit_reached || context_budget_exhausted {
                     if auto_compact_recently_attempted {
+                        let limit_str = limit.to_string();
+                        let current_tokens = total_usage_tokens
+                            .map(|tokens| tokens.to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let percent_remaining_str = context_remaining_percent
+                            .map(|percent| format!("{percent}%"))
+                            .unwrap_or_else(|| "unknown".to_string());
                         let message = if token_limit_reached {
-                            let limit_str = limit.to_string();
-                            let current_tokens = total_usage_tokens
-                                .map(|tokens| tokens.to_string())
-                                .unwrap_or_else(|| "unknown".to_string());
                             format!(
                                 "Conversation is still above the token limit after automatic summarization (limit {limit_str}, current {current_tokens}). Please start a new session or trim your input."
                             )
                         } else {
-                            let percent_remaining = context_left_percent
-                                .map(|percent| format!("{percent}%"))
-                                .unwrap_or_else(|| "an unknown amount".to_string());
                             format!(
-                                "Conversation still has only {percent_remaining} of the context window remaining after automatic summarization. Please start a new session or trim your input."
+                                "Conversation is still near the model's context window after automatic summarization (about {percent_remaining_str} remaining). Please start a new session or trim your input."
                             )
                         };
                         let event = Event {
@@ -1896,6 +1936,18 @@ pub(crate) async fn run_task(
                         break;
                     }
                     auto_compact_recently_attempted = true;
+                    let percent_remaining_str = context_remaining_percent
+                        .map(|percent| format!("{percent}%"))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let message = if token_limit_reached {
+                        "Conversation exceeded the token limit; running automatic summarization and retrying…"
+                            .to_string()
+                    } else {
+                        format!(
+                            "Conversation is within {CONTEXT_REMAINING_AUTO_COMPACT_THRESHOLD}% of the model's context window (about {percent_remaining_str} remaining); running automatic summarization and retrying…"
+                        )
+                    };
+                    sess.notify_background_event(&sub_id, message).await;
                     compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
                     continue;
                 }
@@ -1918,6 +1970,32 @@ pub(crate) async fn run_task(
             }
             Err(e) => {
                 info!("Turn error: {e:#}");
+                if let CodexErr::Stream(msg, _) = &e
+                    && is_context_window_exceeded_error(msg)
+                {
+                    if auto_compact_recently_attempted {
+                        let event = Event {
+                            id: sub_id.clone(),
+                            msg: EventMsg::Error(ErrorEvent {
+                                message: "Conversation is still above the model's context window after automatic summarization. Please trim your input or start a new session.".to_string(),
+                            }),
+                        };
+                        sess.send_event(event).await;
+                        break;
+                    } else {
+                        auto_compact_recently_attempted = true;
+                        sess
+                            .notify_background_event(
+                                &sub_id,
+                                "Conversation exceeded the model's context window; running automatic summarization and retrying…",
+                            )
+                            .await;
+                        compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone())
+                            .await;
+                        continue;
+                    }
+                }
+
                 let event = Event {
                     id: sub_id.clone(),
                     msg: EventMsg::Error(ErrorEvent {
@@ -1930,6 +2008,8 @@ pub(crate) async fn run_task(
             }
         }
     }
+
+    sess.clear_stream_error(&sub_id).await;
 
     // If this was a review thread and we have a final assistant message,
     // try to parse it as a ReviewOutput.
@@ -2030,6 +2110,13 @@ async fn run_turn(
             }
             Err(CodexErr::UsageNotIncluded) => return Err(CodexErr::UsageNotIncluded),
             Err(e) => {
+                // Context window errors are not transient; propagating them allows the
+                // caller to trigger auto-compaction instead of retrying the stream.
+                if let CodexErr::Stream(msg, _) = &e
+                    && is_context_window_exceeded_error(msg)
+                {
+                    return Err(e);
+                }
                 // Use the configured provider-specific stream retry budget.
                 let max_retries = turn_context.client.get_provider().stream_max_retries();
                 if retries < max_retries {
@@ -2047,9 +2134,7 @@ async fn run_turn(
                     // at a seemingly frozen screen.
                     sess.notify_stream_error(
                         &sub_id,
-                        format!(
-                            "stream error: {e}; retrying {retries}/{max_retries} in {delay:?}…"
-                        ),
+                        format!("stream error: {e}; retrying automatically…"),
                     )
                     .await;
 
@@ -2062,6 +2147,13 @@ async fn run_turn(
     }
 }
 
+pub(super) fn is_context_window_exceeded_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("context window")
+        || lower.contains("maximum number of tokens")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("maximum context length")
+}
 /// When the model is prompted, it returns a stream of events. Some of these
 /// events map to a `ResponseItem`. A `ResponseItem` may need to be
 /// "handled" such that it produces a `ResponseInputItem` that needs to be
@@ -2267,24 +2359,6 @@ async fn try_run_turn(
                 response_id: _,
                 token_usage,
             } => {
-                sess.update_token_usage_info(sub_id, turn_context.as_ref(), token_usage.as_ref())
-                    .await;
-
-                let processed_items: Vec<ProcessedResponseItem> = output.try_collect().await?;
-
-                let unified_diff = {
-                    let mut tracker = turn_diff_tracker.lock().await;
-                    tracker.get_unified_diff()
-                };
-                if let Ok(Some(unified_diff)) = unified_diff {
-                    let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-                    let event = Event {
-                        id: sub_id.to_string(),
-                        msg,
-                    };
-                    sess.send_event(event).await;
-                }
-
                 let result = TurnRunResult {
                     processed_items,
                     total_token_usage: token_usage.clone(),

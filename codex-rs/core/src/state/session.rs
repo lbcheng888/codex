@@ -1,5 +1,10 @@
 //! Session-wide mutable state.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::time::Duration;
+use std::time::Instant;
+
 use codex_protocol::models::ResponseItem;
 
 use crate::conversation_history::ConversationHistory;
@@ -13,6 +18,7 @@ pub(crate) struct SessionState {
     pub(crate) history: ConversationHistory,
     pub(crate) token_info: Option<TokenUsageInfo>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+    pub(crate) last_stream_error_by_sub_id: HashMap<String, StreamErrorState>,
 }
 
 impl SessionState {
@@ -20,6 +26,7 @@ impl SessionState {
     pub(crate) fn new() -> Self {
         Self {
             history: ConversationHistory::new(),
+            last_stream_error_by_sub_id: HashMap::new(),
             ..Default::default()
         }
     }
@@ -74,4 +81,34 @@ impl SessionState {
     }
 
     // Pending input/approval moved to TurnState.
+
+    pub(crate) fn should_emit_stream_error(&mut self, sub_id: &str, message: &str) -> bool {
+        let entry = self
+            .last_stream_error_by_sub_id
+            .entry(sub_id.to_string())
+            .or_insert(StreamErrorState {
+                message: String::new(),
+                last_emitted: Instant::now() - STREAM_ERROR_REEMIT_INTERVAL,
+            });
+
+        if entry.message == message && entry.last_emitted.elapsed() < STREAM_ERROR_REEMIT_INTERVAL {
+            return false;
+        }
+
+        entry.message = message.to_string();
+        entry.last_emitted = Instant::now();
+        true
+    }
+
+    pub(crate) fn clear_stream_error(&mut self, sub_id: &str) {
+        self.last_stream_error_by_sub_id.remove(sub_id);
+    }
 }
+
+#[derive(Clone)]
+pub(crate) struct StreamErrorState {
+    message: String,
+    last_emitted: Instant,
+}
+
+const STREAM_ERROR_REEMIT_INTERVAL: Duration = Duration::from_secs(2);

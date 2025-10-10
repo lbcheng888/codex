@@ -11,13 +11,17 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
-#[derive(Clone, Copy, Debug)]
+const CONTEXT_CRITICAL_THRESHOLD: u8 = 5;
+
+#[derive(Clone, Debug)]
 pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
     pub(crate) esc_backtrack_hint: bool,
     pub(crate) use_shift_enter_hint: bool,
     pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<u8>,
+    pub(crate) continuous_paused: bool,
+    pub(crate) continuous_status: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,11 +62,11 @@ pub(crate) fn reset_mode_after_activity(current: FooterMode) -> FooterMode {
     }
 }
 
-pub(crate) fn footer_height(props: FooterProps) -> u16 {
+pub(crate) fn footer_height(props: &FooterProps) -> u16 {
     footer_lines(props).len() as u16
 }
 
-pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
+pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: &FooterProps) {
     Paragraph::new(prefix_lines(
         footer_lines(props),
         " ".repeat(FOOTER_INDENT_COLS).into(),
@@ -71,27 +75,29 @@ pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
     .render(area, buf);
 }
 
-fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
-    // Show the context indicator on the left, appended after the primary hint
-    // (e.g., "? for shortcuts"). Keep it visible even when typing (i.e., when
-    // the shortcut hint is hidden). Hide it only for the multi-line
-    // ShortcutOverlay.
+fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
     match props.mode {
         FooterMode::CtrlCReminder => vec![ctrl_c_reminder_line(CtrlCReminderState {
             is_task_running: props.is_task_running,
         })],
-        FooterMode::ShortcutSummary => {
-            let mut line = context_window_line(props.context_window_percent);
-            line.push_span(" · ".dim());
-            line.extend(vec![
-                key_hint::plain(KeyCode::Char('?')).into(),
-                " for shortcuts".dim(),
-            ]);
-            vec![line]
+        FooterMode::ShortcutPrompt => {
+            if props.is_task_running {
+                let mut lines = vec![context_window_line(props.context_window_percent)];
+                if let Some(status) = props.continuous_status.as_ref() {
+                    lines.push(dim_line(indent_text(status)));
+                }
+                lines
+            } else {
+                vec![Line::from(vec![
+                    key_hint::plain(KeyCode::Char('?')).into(),
+                    " for shortcuts".dim(),
+                ])]
+            }
         }
         FooterMode::ShortcutOverlay => shortcut_overlay_lines(ShortcutsState {
             use_shift_enter_hint: props.use_shift_enter_hint,
             esc_backtrack_hint: props.esc_backtrack_hint,
+            continuous_paused: props.continuous_paused,
         }),
         FooterMode::EscHint => vec![esc_hint_line(props.esc_backtrack_hint)],
         FooterMode::ContextOnly => vec![context_window_line(props.context_window_percent)],
@@ -107,6 +113,7 @@ struct CtrlCReminderState {
 struct ShortcutsState {
     use_shift_enter_hint: bool,
     esc_backtrack_hint: bool,
+    continuous_paused: bool,
 }
 
 fn ctrl_c_reminder_line(state: CtrlCReminderState) -> Line<'static> {
@@ -145,6 +152,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let mut edit_previous = Line::from("");
     let mut quit = Line::from("");
     let mut show_transcript = Line::from("");
+    let mut continuous_resume = Line::from("");
+    let mut continuous_pause = Line::from("");
 
     for descriptor in SHORTCUTS {
         if let Some(text) = descriptor.overlay_entry(state) {
@@ -156,6 +165,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
                 ShortcutId::EditPrevious => edit_previous = text,
                 ShortcutId::Quit => quit = text,
                 ShortcutId::ShowTranscript => show_transcript = text,
+                ShortcutId::ContinuousResume => continuous_resume = text,
+                ShortcutId::ContinuousPause => continuous_pause = text,
             }
         }
     }
@@ -169,6 +180,8 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
         quit,
         Line::from(""),
         show_transcript,
+        continuous_resume,
+        continuous_pause,
     ];
 
     build_columns(ordered)
@@ -222,8 +235,22 @@ fn build_columns(entries: Vec<Line<'static>>) -> Vec<Line<'static>> {
 }
 
 fn context_window_line(percent: Option<u8>) -> Line<'static> {
-    let percent = percent.unwrap_or(100);
-    Line::from(vec![Span::from(format!("{percent}% context left")).dim()])
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    match percent {
+        Some(percent) => {
+            spans.push(format!("{percent}%").dim());
+            spans.push(" context left".dim());
+            if percent <= CONTEXT_CRITICAL_THRESHOLD {
+                spans.push(" ".into());
+                spans.push("(auto-compacting)".yellow().bold());
+            }
+        }
+        None => {
+            spans.push(key_hint::plain(KeyCode::Char('?')).into());
+            spans.push(" for shortcuts".dim());
+        }
+    }
+    Line::from(spans)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,6 +262,8 @@ enum ShortcutId {
     EditPrevious,
     Quit,
     ShowTranscript,
+    ContinuousResume,
+    ContinuousPause,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -254,6 +283,8 @@ enum DisplayCondition {
     Always,
     WhenShiftEnterHint,
     WhenNotShiftEnterHint,
+    WhenContinuousPaused,
+    WhenContinuousRunning,
 }
 
 impl DisplayCondition {
@@ -262,6 +293,8 @@ impl DisplayCondition {
             DisplayCondition::Always => true,
             DisplayCondition::WhenShiftEnterHint => state.use_shift_enter_hint,
             DisplayCondition::WhenNotShiftEnterHint => !state.use_shift_enter_hint,
+            DisplayCondition::WhenContinuousPaused => state.continuous_paused,
+            DisplayCondition::WhenContinuousRunning => !state.continuous_paused,
         }
     }
 }
@@ -369,7 +402,33 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
         prefix: "",
         label: " to view transcript",
     },
+    ShortcutDescriptor {
+        id: ShortcutId::ContinuousResume,
+        bindings: &[ShortcutBinding {
+            key: key_hint::plain(KeyCode::Char('c')),
+            condition: DisplayCondition::WhenContinuousPaused,
+        }],
+        prefix: "",
+        label: " 继续连续模式",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ContinuousPause,
+        bindings: &[ShortcutBinding {
+            key: key_hint::plain(KeyCode::Char('p')),
+            condition: DisplayCondition::WhenContinuousRunning,
+        }],
+        prefix: "",
+        label: " 暂停连续模式",
+    },
 ];
+
+fn indent_text(text: &str) -> String {
+    format!("  {text}")
+}
+
+fn dim_line(text: String) -> Line<'static> {
+    Line::from(text).dim()
+}
 
 #[cfg(test)]
 mod tests {
@@ -379,12 +438,12 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn snapshot_footer(name: &str, props: FooterProps) {
-        let height = footer_height(props).max(1);
+        let height = footer_height(&props).max(1);
         let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, f.area().width, height);
-                render_footer(area, f.buffer_mut(), props);
+                render_footer(area, f.buffer_mut(), &props);
             })
             .unwrap();
         assert_snapshot!(name, terminal.backend());
@@ -400,6 +459,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -411,6 +472,8 @@ mod tests {
                 use_shift_enter_hint: true,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -422,6 +485,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -433,6 +498,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -444,6 +511,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -455,6 +524,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
 
@@ -466,6 +537,8 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: Some(72),
+                continuous_paused: false,
+                continuous_status: None,
             },
         );
     }

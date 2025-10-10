@@ -69,6 +69,8 @@ pub(crate) struct BottomPane {
     /// Queued user messages to show under the status indicator.
     queued_user_messages: Vec<String>,
     context_window_percent: Option<u8>,
+    continuous_paused: bool,
+    continuous_status: Option<String>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -102,6 +104,8 @@ impl BottomPane {
             queued_user_messages: Vec::new(),
             esc_backtrack_hint: false,
             context_window_percent: None,
+            continuous_paused: false,
+            continuous_status: None,
         }
     }
 
@@ -357,6 +361,13 @@ impl BottomPane {
 
         self.context_window_percent = percent;
         self.composer.set_context_window_percent(percent);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_continuous_status(&mut self, paused: bool, status: Option<String>) {
+        self.continuous_paused = paused;
+        self.composer.set_continuous_status(paused, status.clone());
+        self.continuous_status = status;
         self.request_redraw();
     }
 

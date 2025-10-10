@@ -3,6 +3,9 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::chatwidget::ChatWidget;
+use crate::continuous_mode::ContinuousModeSettings;
+use crate::continuous_runtime::ContinuousController;
+use crate::continuous_runtime::ContinuousNotice;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
@@ -71,6 +74,9 @@ pub(crate) struct App {
 
     // Esc-backtracking state grouped
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
+    #[allow(dead_code)]
+    pub(crate) continuous_settings: Option<ContinuousModeSettings>,
+    pub(crate) continuous_controller: Option<ContinuousController>,
 }
 
 impl App {
@@ -82,6 +88,7 @@ impl App {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         resume_selection: ResumeSelection,
+        continuous: Option<ContinuousModeSettings>,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
@@ -137,6 +144,16 @@ impl App {
 
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
 
+        let continuous_controller = if let Some(settings) = continuous.clone() {
+            Some(ContinuousController::new(
+                settings.clone(),
+                &config.codex_home,
+                app_event_tx.clone(),
+            )?)
+        } else {
+            None
+        };
+
         let mut app = Self {
             server: conversation_manager,
             app_event_tx,
@@ -152,6 +169,8 @@ impl App {
             has_emitted_history_lines: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            continuous_settings: continuous,
+            continuous_controller,
         };
 
         let tui_events = tui.event_stream();
@@ -167,6 +186,9 @@ impl App {
                 app.handle_tui_event(tui, event).await?
             }
         } {}
+        if let Some(controller) = app.continuous_controller.as_mut() {
+            controller.finalize().await?;
+        }
         tui.terminal.clear()?;
         Ok(AppExitInfo {
             token_usage: app.token_usage(),
@@ -281,7 +303,22 @@ impl App {
                 self.chat_widget.on_commit_tick();
             }
             AppEvent::CodexEvent(event) => {
-                self.chat_widget.handle_codex_event(event);
+                let mut consume = false;
+                if let Some(controller) = self.continuous_controller.as_mut() {
+                    match controller.on_codex_event(&event, &self.config.cwd).await {
+                        Ok(result) => {
+                            consume = result.consume_event;
+                            self.push_continuous_notices(result.notices);
+                        }
+                        Err(err) => {
+                            self.chat_widget
+                                .add_error_message(format!("Continuous mode error: {err}"));
+                        }
+                    }
+                }
+                if !consume {
+                    self.chat_widget.handle_codex_event(event);
+                }
             }
             AppEvent::ConversationHistory(ev) => {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
@@ -413,7 +450,34 @@ impl App {
         self.config.model_reasoning_effort = effort;
     }
 
+    fn push_continuous_notices(&mut self, notices: Vec<ContinuousNotice>) {
+        for notice in notices {
+            match notice {
+                ContinuousNotice::Info(message) => {
+                    self.chat_widget.add_info_message(message, None);
+                }
+                ContinuousNotice::Warn(message) => {
+                    self.chat_widget.add_info_message(message, None);
+                }
+            }
+        }
+        if let Some(controller) = self.continuous_controller.as_ref() {
+            self.chat_widget
+                .set_continuous_status(controller.is_paused(), controller.summary_message());
+        }
+    }
+
     async fn handle_key_event(&mut self, tui: &mut tui::Tui, key_event: KeyEvent) {
+        if let Some(controller) = self.continuous_controller.as_mut() {
+            if let Ok(Some(notices)) = controller
+                .handle_key_event(&key_event, &self.config.cwd)
+                .await
+            {
+                self.push_continuous_notices(notices);
+                return;
+            }
+        }
+
         match key_event {
             KeyEvent {
                 code: KeyCode::Char('t'),
@@ -520,6 +584,8 @@ mod tests {
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            continuous_settings: None,
+            continuous_controller: None,
         }
     }
 

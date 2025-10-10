@@ -81,3 +81,7 @@ CHANGELOG.ignore.md
 # nix related
 .direnv
 .envrc
+snapshots/
+.graphiti/
+.bin
+.cargo

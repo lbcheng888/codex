@@ -1,3 +1,4 @@
+use clap::Args;
 use clap::Parser;
 use codex_common::ApprovalModeCliArg;
 use codex_common::CliConfigOverrides;
@@ -74,4 +75,31 @@ pub struct Cli {
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
+
+    #[clap(flatten)]
+    pub continuous: ContinuousCliArgs,
+}
+
+#[derive(Args, Debug, Default, Clone)]
+pub struct ContinuousCliArgs {
+    /// Enable continuous execution loop with automatic planning.
+    #[arg(long = "continuous", default_value_t = false)]
+    pub enabled: bool,
+
+    /// Maximum number of execution steps before auto-pausing.
+    #[arg(
+        long = "max-steps",
+        value_name = "N",
+        requires = "enabled",
+        value_parser = clap::value_parser!(u32).range(1..=200)
+    )]
+    pub max_steps: Option<u32>,
+
+    /// Whether Codex should pause for confirmation when the plan hits a breakpoint.
+    #[arg(
+        long = "confirm-on-breakpoint",
+        value_name = "BOOL",
+        requires = "enabled"
+    )]
+    pub confirm_on_breakpoint: Option<bool>,
 }
