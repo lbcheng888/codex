@@ -20,6 +20,10 @@ use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
 use base64::Engine;
+use chrono::DateTime;
+use chrono::Local;
+#[cfg(test)]
+use chrono::TimeZone;
 use codex_core::config::Config;
 use codex_core::config_types::McpServerTransportConfig;
 use codex_core::config_types::ReasoningSummaryFormat;
@@ -1224,10 +1228,14 @@ pub(crate) fn new_reasoning_summary_block(
 #[derive(Debug)]
 pub struct FinalMessageSeparator {
     elapsed_seconds: Option<u64>,
+    finished_at: DateTime<Local>,
 }
 impl FinalMessageSeparator {
     pub(crate) fn new(elapsed_seconds: Option<u64>) -> Self {
-        Self { elapsed_seconds }
+        Self {
+            elapsed_seconds,
+            finished_at: final_message_separator_finished_at(),
+        }
     }
 }
 impl HistoryCell for FinalMessageSeparator {
@@ -1236,7 +1244,8 @@ impl HistoryCell for FinalMessageSeparator {
             .elapsed_seconds
             .map(super::status_indicator_widget::fmt_elapsed_compact);
         if let Some(elapsed_seconds) = elapsed_seconds {
-            let worked_for = format!("─ Worked for {elapsed_seconds} ─");
+            let local_time = self.finished_at.format("%H:%M:%S");
+            let worked_for = format!("{local_time} ─ Worked for {elapsed_seconds} ─");
             let worked_for_width = worked_for.width();
             vec![
                 Line::from_iter([
@@ -1248,6 +1257,20 @@ impl HistoryCell for FinalMessageSeparator {
         } else {
             vec![Line::from_iter(["─".repeat(width as usize).dim()])]
         }
+    }
+}
+
+fn final_message_separator_finished_at() -> DateTime<Local> {
+    #[cfg(test)]
+    {
+        Local
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid static timestamp")
+    }
+    #[cfg(not(test))]
+    {
+        Local::now()
     }
 }
 

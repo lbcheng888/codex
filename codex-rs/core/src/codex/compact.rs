@@ -113,8 +113,7 @@ async fn run_compact_task_inner(
                 return;
             }
             Err(e @ CodexErr::ContextWindowExceeded) => {
-                if turn_input.len() > 1 {
-                    turn_input.remove(0);
+                if turn_input.len() > 1 && remove_oldest_turn_item(&mut turn_input) {
                     truncated_count += 1;
                     retries = 0;
                     continue;
@@ -131,6 +130,25 @@ async fn run_compact_task_inner(
                 return;
             }
             Err(e) => {
+                if let CodexErr::Stream(message, _) = &e {
+                    if message == "stream closed before response.completed" {
+                        if turn_input.len() > 1 && remove_oldest_turn_item(&mut turn_input) {
+                            truncated_count += 1;
+                            retries = 0;
+                            continue;
+                        }
+                        sess.set_total_tokens_full(&sub_id, turn_context.as_ref())
+                            .await;
+                        let event = Event {
+                            id: sub_id.clone(),
+                            msg: EventMsg::Error(ErrorEvent {
+                                message: e.to_string(),
+                            }),
+                        };
+                        sess.send_event(event).await;
+                        return;
+                    }
+                }
                 if retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
@@ -215,6 +233,58 @@ pub fn is_session_prefix_message(text: &str) -> bool {
         InputMessageKind::from(("user", text)),
         InputMessageKind::UserInstructions | InputMessageKind::EnvironmentContext
     )
+}
+
+fn remove_oldest_turn_item(turn_input: &mut Vec<ResponseItem>) -> bool {
+    loop {
+        let Some(item) = turn_input.first() else {
+            return false;
+        };
+        match item {
+            ResponseItem::Reasoning { .. } => {
+                turn_input.remove(0);
+            }
+            ResponseItem::FunctionCall { call_id, .. } => {
+                let call_id = call_id.clone();
+                turn_input.remove(0);
+                remove_outputs_for_call(turn_input, &call_id);
+                return true;
+            }
+            ResponseItem::LocalShellCall { call_id, .. } => {
+                let call_id = call_id.clone();
+                turn_input.remove(0);
+                if let Some(call_id) = call_id {
+                    remove_outputs_for_call(turn_input, &call_id);
+                }
+                return true;
+            }
+            ResponseItem::CustomToolCall { call_id, .. } => {
+                let call_id = call_id.clone();
+                turn_input.remove(0);
+                remove_outputs_for_call(turn_input, &call_id);
+                return true;
+            }
+            ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
+                turn_input.remove(0);
+            }
+            _ => {
+                turn_input.remove(0);
+                return true;
+            }
+        }
+    }
+}
+
+fn remove_outputs_for_call(turn_input: &mut Vec<ResponseItem>, call_id: &str) {
+    turn_input.retain(|item| match item {
+        ResponseItem::FunctionCallOutput {
+            call_id: existing, ..
+        } => existing != call_id,
+        ResponseItem::CustomToolCallOutput {
+            call_id: existing, ..
+        } => existing != call_id,
+        _ => true,
+    });
 }
 
 pub(crate) fn build_compacted_history(

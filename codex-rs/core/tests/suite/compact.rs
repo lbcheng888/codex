@@ -407,6 +407,159 @@ async fn auto_compact_runs_after_token_limit_hit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_compact_runs_when_one_percent_context_left() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+
+    let sse1 = sse(vec![
+        ev_assistant_message("m1", FIRST_AUTO_MSG),
+        ev_completed_with_tokens("r1", 15_000),
+    ]);
+
+    let sse2 = sse(vec![
+        ev_assistant_message("m2", SECOND_AUTO_MSG),
+        ev_completed_with_tokens("r2", 19_920),
+    ]);
+
+    let sse3 = sse(vec![
+        ev_assistant_message("m3", AUTO_SUMMARY_TEXT),
+        ev_completed_with_tokens("r3", 200),
+    ]);
+
+    let first_matcher = |req: &wiremock::Request| {
+        let body = std::str::from_utf8(&req.body).unwrap_or("");
+        body.contains(FIRST_AUTO_MSG)
+            && !body.contains(SECOND_AUTO_MSG)
+            && !body.contains("You have exceeded the maximum number of tokens")
+    };
+    mount_sse_once_match(&server, first_matcher, sse1).await;
+
+    let second_matcher = |req: &wiremock::Request| {
+        let body = std::str::from_utf8(&req.body).unwrap_or("");
+        body.contains(SECOND_AUTO_MSG)
+            && body.contains(FIRST_AUTO_MSG)
+            && !body.contains("You have exceeded the maximum number of tokens")
+    };
+    mount_sse_once_match(&server, second_matcher, sse2).await;
+
+    let third_matcher = |req: &wiremock::Request| {
+        let body = std::str::from_utf8(&req.body).unwrap_or("");
+        body.contains("You have exceeded the maximum number of tokens")
+    };
+    mount_sse_once_match(&server, third_matcher, sse3).await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+
+    let home = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&home);
+    config.model_provider = model_provider;
+    config.model_context_window = Some(20_000);
+    config.model_auto_compact_token_limit = None;
+    let conversation_manager = ConversationManager::with_auth(CodexAuth::from_api_key("dummy"));
+    let codex = conversation_manager
+        .new_conversation(config)
+        .await
+        .unwrap()
+        .conversation;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: FIRST_AUTO_MSG.into(),
+            }],
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: SECOND_AUTO_MSG.into(),
+            }],
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests.len() >= 3,
+        "auto compact should add at least a third request when context is nearly full, got {}",
+        requests.len()
+    );
+
+    let is_auto_compact = |req: &wiremock::Request| {
+        std::str::from_utf8(&req.body)
+            .unwrap_or("")
+            .contains("You have exceeded the maximum number of tokens")
+    };
+    let auto_compact_count = requests.iter().filter(|req| is_auto_compact(req)).count();
+    assert_eq!(
+        auto_compact_count, 1,
+        "expected exactly one auto compact request"
+    );
+
+    let auto_compact_index = requests
+        .iter()
+        .enumerate()
+        .find_map(|(idx, req)| is_auto_compact(req).then_some(idx))
+        .expect("auto compact request missing");
+    assert_eq!(
+        auto_compact_index, 2,
+        "auto compact should add a third request"
+    );
+
+    let body_first = requests[0].body_json::<serde_json::Value>().unwrap();
+    let body3 = requests[auto_compact_index]
+        .body_json::<serde_json::Value>()
+        .unwrap();
+    let instructions = body3
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let baseline_instructions = body_first
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(
+        instructions, baseline_instructions,
+        "auto compact should keep the standard developer instructions",
+    );
+
+    let input3 = body3.get("input").and_then(|v| v.as_array()).unwrap();
+    let last3 = input3
+        .last()
+        .expect("auto compact request should append a user message");
+    assert_eq!(last3.get("type").and_then(|v| v.as_str()), Some("message"));
+    assert_eq!(last3.get("role").and_then(|v| v.as_str()), Some("user"));
+    let last_text = last3
+        .get("content")
+        .and_then(|v| v.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(|text| text.as_str())
+        .unwrap_or_default();
+    assert_eq!(
+        last_text, SUMMARIZATION_PROMPT,
+        "auto compact should send the summarization prompt as a user message",
+    );
+
+    let second_body = std::str::from_utf8(&requests[1].body).unwrap_or("");
+    assert!(
+        !second_body.contains("You have exceeded the maximum number of tokens"),
+        "second request should represent the normal turn, not the summarization prompt"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_compact_persists_rollout_entries() {
     skip_if_no_network!();
 

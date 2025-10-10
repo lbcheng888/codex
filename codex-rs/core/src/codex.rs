@@ -799,6 +799,21 @@ impl Session {
         }
     }
 
+    async fn context_window_remaining_percent(&self, turn_context: &TurnContext) -> Option<u8> {
+        let token_info = {
+            let state = self.state.lock().await;
+            state.token_info.clone()
+        };
+        let info = token_info?;
+        let context_window = info
+            .model_context_window
+            .or_else(|| turn_context.client.get_model_context_window())?;
+        Some(
+            info.last_token_usage
+                .percent_of_context_window_remaining(context_window),
+        )
+    }
+
     /// Record a user input item to conversation history and also persist a
     /// corresponding UserMessage EventMsg to rollout.
     async fn record_input_and_rollout_usermsg(&self, response_input: &ResponseInputItem) {
@@ -1671,6 +1686,16 @@ pub(crate) async fn run_task(
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
+        if !auto_compact_recently_attempted
+            && sess
+                .context_window_remaining_percent(turn_context.as_ref())
+                .await
+                .is_some_and(|percent| percent <= 1)
+        {
+            auto_compact_recently_attempted = true;
+            compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
+            continue;
+        }
         let pending_input = sess
             .get_pending_input()
             .await
@@ -1729,12 +1754,18 @@ pub(crate) async fn run_task(
                     .client
                     .get_auto_compact_token_limit()
                     .unwrap_or(i64::MAX);
+                let context_window = turn_context.client.get_model_context_window();
                 let total_usage_tokens = total_token_usage
                     .as_ref()
                     .map(TokenUsage::tokens_in_context_window);
+                let context_left_percent = total_token_usage.as_ref().and_then(|usage| {
+                    context_window.map(|window| usage.percent_of_context_window_remaining(window))
+                });
                 let token_limit_reached = total_usage_tokens
                     .map(|tokens| (tokens as i64) >= limit)
                     .unwrap_or(false);
+                let context_left_critically_low =
+                    context_left_percent.is_some_and(|percent| percent <= 1);
                 let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
                 let mut responses = Vec::<ResponseInputItem>::new();
                 for processed_response_item in processed_items {
@@ -1839,19 +1870,27 @@ pub(crate) async fn run_task(
                     }
                 }
 
-                if token_limit_reached {
+                if token_limit_reached || context_left_critically_low {
                     if auto_compact_recently_attempted {
-                        let limit_str = limit.to_string();
-                        let current_tokens = total_usage_tokens
-                            .map(|tokens| tokens.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
+                        let message = if token_limit_reached {
+                            let limit_str = limit.to_string();
+                            let current_tokens = total_usage_tokens
+                                .map(|tokens| tokens.to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            format!(
+                                "Conversation is still above the token limit after automatic summarization (limit {limit_str}, current {current_tokens}). Please start a new session or trim your input."
+                            )
+                        } else {
+                            let percent_remaining = context_left_percent
+                                .map(|percent| format!("{percent}%"))
+                                .unwrap_or_else(|| "an unknown amount".to_string());
+                            format!(
+                                "Conversation still has only {percent_remaining} of the context window remaining after automatic summarization. Please start a new session or trim your input."
+                            )
+                        };
                         let event = Event {
                             id: sub_id.clone(),
-                            msg: EventMsg::Error(ErrorEvent {
-                                message: format!(
-                                    "Conversation is still above the token limit after automatic summarization (limit {limit_str}, current {current_tokens}). Please start a new session or trim your input."
-                                ),
-                            }),
+                            msg: EventMsg::Error(ErrorEvent { message }),
                         };
                         sess.send_event(event).await;
                         break;
