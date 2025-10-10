@@ -177,7 +177,7 @@ async fn run_compact_task_inner(
                     let delay = backoff(retries);
                     sess.notify_stream_error(
                         &sub_id,
-                        format!("stream error: {e}; retrying automatically…"),
+                        format!("Re-connecting... {retries}/{max_retries}"),
                     )
                     .await;
                     tokio::time::sleep(delay).await;
