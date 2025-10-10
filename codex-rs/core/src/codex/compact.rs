@@ -80,21 +80,17 @@ async fn run_compact_task_inner(
     input: Vec<InputItem>,
 ) {
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-    let turn_input = build_compact_prompt_input(
+    let mut turn_input = build_compact_prompt_input(
         sess.as_ref(),
         turn_context.as_ref(),
         initial_input_for_turn.clone(),
     )
     .await;
 
-    let prompt = Prompt {
-        input: turn_input,
-        ..Default::default()
-    };
-
     let max_retries = turn_context.client.get_provider().stream_max_retries();
     let mut retries = 0;
     let mut summary_override: Option<String> = None;
+    let mut truncated_count = 0usize;
 
     let rollout_item = RolloutItem::TurnContext(TurnContextItem {
         cwd: turn_context.cwd.clone(),
@@ -199,6 +195,16 @@ async fn run_compact_task_inner(
         }
     }
 
+    if truncated_count > 0 {
+        sess.notify_background_event(
+            &sub_id,
+            format!(
+                "Trimmed {truncated_count} older conversation item(s) while retrying automatic summarization."
+            ),
+        )
+        .await;
+    }
+
     let history_snapshot = sess.history_snapshot().await;
     let summary_text = summary_override.unwrap_or_else(|| {
         get_last_assistant_message_from_turn(&history_snapshot).unwrap_or_default()
@@ -259,6 +265,58 @@ pub fn is_session_prefix_message(text: &str) -> bool {
         InputMessageKind::from(("user", text)),
         InputMessageKind::UserInstructions | InputMessageKind::EnvironmentContext
     )
+}
+
+fn remove_oldest_turn_item(turn_input: &mut Vec<ResponseItem>) -> bool {
+    loop {
+        let Some(item) = turn_input.first() else {
+            return false;
+        };
+        match item {
+            ResponseItem::Reasoning { .. } => {
+                turn_input.remove(0);
+            }
+            ResponseItem::FunctionCall { call_id, .. } => {
+                let call_id = call_id.clone();
+                turn_input.remove(0);
+                remove_outputs_for_call(turn_input, &call_id);
+                return true;
+            }
+            ResponseItem::LocalShellCall { call_id, .. } => {
+                let call_id = call_id.clone();
+                turn_input.remove(0);
+                if let Some(call_id) = call_id {
+                    remove_outputs_for_call(turn_input, &call_id);
+                }
+                return true;
+            }
+            ResponseItem::CustomToolCall { call_id, .. } => {
+                let call_id = call_id.clone();
+                turn_input.remove(0);
+                remove_outputs_for_call(turn_input, &call_id);
+                return true;
+            }
+            ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
+                turn_input.remove(0);
+            }
+            _ => {
+                turn_input.remove(0);
+                return true;
+            }
+        }
+    }
+}
+
+fn remove_outputs_for_call(turn_input: &mut Vec<ResponseItem>, call_id: &str) {
+    turn_input.retain(|item| match item {
+        ResponseItem::FunctionCallOutput {
+            call_id: existing, ..
+        } => existing != call_id,
+        ResponseItem::CustomToolCallOutput {
+            call_id: existing, ..
+        } => existing != call_id,
+        _ => true,
+    });
 }
 
 struct TruncationSummary {

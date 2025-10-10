@@ -80,20 +80,7 @@ fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
         FooterMode::CtrlCReminder => vec![ctrl_c_reminder_line(CtrlCReminderState {
             is_task_running: props.is_task_running,
         })],
-        FooterMode::ShortcutPrompt => {
-            if props.is_task_running {
-                let mut lines = vec![context_window_line(props.context_window_percent)];
-                if let Some(status) = props.continuous_status.as_ref() {
-                    lines.push(dim_line(indent_text(status)));
-                }
-                lines
-            } else {
-                vec![Line::from(vec![
-                    key_hint::plain(KeyCode::Char('?')).into(),
-                    " for shortcuts".dim(),
-                ])]
-            }
-        }
+        FooterMode::ShortcutSummary => shortcut_summary_lines(props),
         FooterMode::ShortcutOverlay => shortcut_overlay_lines(ShortcutsState {
             use_shift_enter_hint: props.use_shift_enter_hint,
             esc_backtrack_hint: props.esc_backtrack_hint,
@@ -234,16 +221,28 @@ fn build_columns(entries: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn shortcut_summary_lines(props: &FooterProps) -> Vec<Line<'static>> {
+    let mut line = context_window_line(props.context_window_percent);
+    if props.context_window_percent.is_some() {
+        line.push_span(" · ".dim());
+        line.push_span(key_hint::plain(KeyCode::Char('?')));
+        line.push_span(" for shortcuts".dim());
+    }
+    let mut lines = vec![line];
+    if props.is_task_running {
+        if let Some(status) = props.continuous_status.as_ref() {
+            lines.push(dim_line(indent_text(status)));
+        }
+    }
+    lines
+}
+
 fn context_window_line(percent: Option<u8>) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     match percent {
         Some(percent) => {
             spans.push(format!("{percent}%").dim());
             spans.push(" context left".dim());
-            if percent <= CONTEXT_CRITICAL_THRESHOLD {
-                spans.push(" ".into());
-                spans.push("(auto-compacting)".yellow().bold());
-            }
         }
         None => {
             spans.push(key_hint::plain(KeyCode::Char('?')).into());

@@ -23,6 +23,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TaskStartedEvent;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
+use futures::TryStreamExt;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesOrdered;
@@ -1751,9 +1752,9 @@ pub(crate) async fn run_task(
             })
             .collect();
         match run_turn(
-            sess.as_ref(),
-            turn_context.as_ref(),
-            &mut turn_diff_tracker,
+            Arc::clone(&sess),
+            Arc::clone(&turn_context),
+            Arc::clone(&turn_diff_tracker),
             sub_id.clone(),
             turn_input,
         )
@@ -1764,9 +1765,17 @@ pub(crate) async fn run_task(
                     processed_items,
                     total_token_usage,
                 } = turn_output;
-                sess.update_token_usage_info(&sub_id, &turn_context, total_token_usage.as_ref())
-                    .await;
-                if let Ok(Some(unified_diff)) = turn_diff_tracker.get_unified_diff() {
+                sess.update_token_usage_info(
+                    &sub_id,
+                    turn_context.as_ref(),
+                    total_token_usage.as_ref(),
+                )
+                .await;
+                let unified_diff = {
+                    let mut tracker = turn_diff_tracker.lock().await;
+                    tracker.get_unified_diff()
+                };
+                if let Ok(Some(unified_diff)) = unified_diff {
                     let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
                     let event = Event {
                         id: sub_id.to_string(),
@@ -1779,18 +1788,15 @@ pub(crate) async fn run_task(
                 let total_usage_tokens = total_token_usage
                     .as_ref()
                     .map(TokenUsage::tokens_in_context_window);
-                let context_left_percent = total_token_usage.as_ref().and_then(|usage| {
-                    context_window.map(|window| usage.percent_of_context_window_remaining(window))
-                });
-                let token_limit_reached = total_usage_tokens
-                    .map(|tokens| (tokens as i64) >= limit)
-                    .unwrap_or(false);
                 let context_window = turn_context.client.get_model_context_window().or_else(|| {
                     auto_compact_limit.and_then(|value| (value > 0).then_some(value as u64))
                 });
                 let context_remaining_percent = total_token_usage.as_ref().and_then(|usage| {
                     context_window.map(|window| usage.percent_of_context_window_remaining(window))
                 });
+                let token_limit_reached = total_usage_tokens
+                    .map(|tokens| (tokens as i64) >= limit)
+                    .unwrap_or(false);
                 let context_budget_exhausted = context_remaining_percent
                     .is_some_and(|percent| percent <= CONTEXT_REMAINING_AUTO_COMPACT_THRESHOLD);
                 let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
@@ -2359,6 +2365,7 @@ async fn try_run_turn(
                 response_id: _,
                 token_usage,
             } => {
+                let processed_items: Vec<ProcessedResponseItem> = output.try_collect().await?;
                 let result = TurnRunResult {
                     processed_items,
                     total_token_usage: token_usage.clone(),

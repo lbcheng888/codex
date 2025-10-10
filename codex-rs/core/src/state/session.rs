@@ -1,7 +1,6 @@
 //! Session-wide mutable state.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
