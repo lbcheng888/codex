@@ -11,8 +11,6 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
-const CONTEXT_CRITICAL_THRESHOLD: u8 = 5;
-
 #[derive(Clone, Debug)]
 pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
