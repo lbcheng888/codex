@@ -1,3 +1,4 @@
+use chrono::Local;
 use codex_common::elapsed::format_duration;
 use codex_common::elapsed::format_elapsed;
 use codex_core::config::Config;
@@ -61,6 +62,7 @@ pub(crate) struct EventProcessorWithHumanOutput {
     last_message_path: Option<PathBuf>,
     last_total_token_usage: Option<codex_core::protocol::TokenUsageInfo>,
     final_message: Option<String>,
+    start_instant: Instant,
 }
 
 impl EventProcessorWithHumanOutput {
@@ -70,6 +72,7 @@ impl EventProcessorWithHumanOutput {
         last_message_path: Option<PathBuf>,
     ) -> Self {
         let call_id_to_patch = HashMap::new();
+        let start_instant = Instant::now();
 
         if with_ansi {
             Self {
@@ -86,6 +89,7 @@ impl EventProcessorWithHumanOutput {
                 last_message_path,
                 last_total_token_usage: None,
                 final_message: None,
+                start_instant,
             }
         } else {
             Self {
@@ -102,6 +106,7 @@ impl EventProcessorWithHumanOutput {
                 last_message_path,
                 last_total_token_usage: None,
                 final_message: None,
+                start_instant,
             }
         }
     }
@@ -223,7 +228,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 exit_code,
                 ..
             }) => {
-                let duration = format!(" in {}", format_duration(duration));
+                let duration_suffix = format!(" in {}", format_duration(duration));
 
                 let truncated_output = aggregated_output
                     .lines()
@@ -232,11 +237,11 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     .join("\n");
                 match exit_code {
                     0 => {
-                        let title = format!(" succeeded{duration}:");
+                        let title = format!(" succeeded{duration_suffix}:");
                         ts_msg!(self, "{}", title.style(self.green));
                     }
                     _ => {
-                        let title = format!(" exited {exit_code}{duration}:");
+                        let title = format!(" exited {exit_code}{duration_suffix}:");
                         ts_msg!(self, "{}", title.style(self.red));
                     }
                 }
@@ -525,10 +530,21 @@ impl EventProcessor for EventProcessorWithHumanOutput {
 
     fn print_final_output(&mut self) {
         if let Some(usage_info) = &self.last_total_token_usage {
+            let mut metrics = Vec::new();
+            metrics.push(format_with_separators(
+                usage_info.total_token_usage.blended_total(),
+            ));
+            let finished_at = Local::now().format("%H:%M:%S").to_string();
+            metrics.push(format!("completed {finished_at}"));
+            metrics.push(format!(
+                "duration {}",
+                format_duration(self.start_instant.elapsed())
+            ));
+            let summary = metrics.join(" | ");
             eprintln!(
-                "{}\n{}",
+                "{} {}",
                 "tokens used".style(self.magenta).style(self.italic),
-                format_with_separators(usage_info.total_token_usage.blended_total())
+                summary
             );
         }
 

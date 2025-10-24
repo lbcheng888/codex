@@ -46,6 +46,7 @@ ts-rs = { workspace = true, features = [
     "serde-json-impl",
     "no-serde-warnings",
 ] }
+chrono = { workspace = true }
 
 
 [dev-dependencies]
