@@ -16,6 +16,7 @@ use codex_protocol::models::ResponseItem;
 use eventsource_stream::Eventsource;
 use futures::prelude::*;
 use regex_lite::Regex;
+use reqwest::Method;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
@@ -358,6 +359,13 @@ impl ModelClient {
                 }
 
                 // spawn task to process SSE
+                let fallback = self.provider.is_azure_responses_endpoint().then(|| {
+                    ResponsesCompletionFallback::new(
+                        self.provider.clone(),
+                        self.client.clone(),
+                        auth_manager.clone(),
+                    )
+                });
                 let stream = resp.bytes_stream().map_err(move |e| {
                     CodexErr::ResponseStreamFailed(ResponseStreamFailed {
                         source: e,
@@ -369,6 +377,7 @@ impl ModelClient {
                     tx_event,
                     self.provider.stream_idle_timeout(),
                     self.otel_event_manager.clone(),
+                    fallback,
                 ));
 
                 Ok(ResponseStream { rx_event })
@@ -484,6 +493,27 @@ impl ModelClient {
     }
 }
 
+#[derive(Clone)]
+struct ResponsesCompletionFallback {
+    provider: ModelProviderInfo,
+    client: reqwest::Client,
+    auth_manager: Option<Arc<AuthManager>>,
+}
+
+impl ResponsesCompletionFallback {
+    fn new(
+        provider: ModelProviderInfo,
+        client: reqwest::Client,
+        auth_manager: Option<Arc<AuthManager>>,
+    ) -> Self {
+        Self {
+            provider,
+            client,
+            auth_manager,
+        }
+    }
+}
+
 enum StreamAttemptError {
     RetryableHttpError {
         status: StatusCode,
@@ -544,6 +574,11 @@ struct ResponseCompleted {
 }
 
 #[derive(Debug, Deserialize)]
+struct ResponseCreated {
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ResponseCompletedUsage {
     input_tokens: i64,
     input_tokens_details: Option<ResponseCompletedInputTokensDetails>,
@@ -578,6 +613,63 @@ struct ResponseCompletedInputTokensDetails {
 #[derive(Debug, Deserialize)]
 struct ResponseCompletedOutputTokensDetails {
     reasoning_tokens: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesGetResponse {
+    id: String,
+    status: Option<String>,
+    usage: Option<ResponseCompletedUsage>,
+}
+
+impl ResponsesCompletionFallback {
+    async fn fetch_completion(&self, response_id: &str) -> Result<ResponseCompleted> {
+        let auth = self.auth_manager.as_ref().and_then(|m| m.auth());
+        let request = self
+            .provider
+            .create_request_builder_with_method(&self.client, &auth, Method::GET, Some(response_id))
+            .await?
+            .header("OpenAI-Beta", "responses=experimental");
+
+        let response = request.send().await.map_err(|err| {
+            CodexErr::Stream(
+                format!("failed to fetch response {response_id}: {err}"),
+                None,
+            )
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CodexErr::Stream(
+                format!(
+                    "failed to fetch response {response_id}: unexpected status {status}: {body}"
+                ),
+                None,
+            ));
+        }
+
+        let body: ResponsesGetResponse = response.json().await.map_err(|err| {
+            CodexErr::Stream(
+                format!("failed to parse response {response_id}: {err}"),
+                None,
+            )
+        })?;
+
+        if let Some(status) = body.status.as_deref()
+            && status != "completed"
+        {
+            return Err(CodexErr::Stream(
+                format!("response {response_id} ended with status {status}"),
+                None,
+            ));
+        }
+
+        Ok(ResponseCompleted {
+            id: body.id,
+            usage: body.usage,
+        })
+    }
 }
 
 fn attach_item_ids(payload_json: &mut Value, original_items: &[ResponseItem]) {
@@ -669,6 +761,7 @@ async fn process_sse<S>(
     tx_event: mpsc::Sender<Result<ResponseEvent>>,
     idle_timeout: Duration,
     otel_event_manager: OtelEventManager,
+    fallback: Option<ResponsesCompletionFallback>,
 ) where
     S: Stream<Item = Result<Bytes>> + Unpin,
 {
@@ -678,6 +771,8 @@ async fn process_sse<S>(
     // The response id returned from the "complete" message.
     let mut response_completed: Option<ResponseCompleted> = None;
     let mut response_error: Option<CodexErr> = None;
+    let mut response_created_id: Option<String> = None;
+    let mut response_completion_fallback_error: Option<CodexErr> = None;
 
     loop {
         let start = std::time::Instant::now();
@@ -694,41 +789,67 @@ async fn process_sse<S>(
                 return;
             }
             Ok(None) => {
-                match response_completed {
-                    Some(ResponseCompleted {
-                        id: response_id,
-                        usage,
-                    }) => {
-                        if let Some(token_usage) = &usage {
-                            otel_event_manager.sse_event_completed(
-                                token_usage.input_tokens,
-                                token_usage.output_tokens,
-                                token_usage
-                                    .input_tokens_details
-                                    .as_ref()
-                                    .map(|d| d.cached_tokens),
-                                token_usage
-                                    .output_tokens_details
-                                    .as_ref()
-                                    .map(|d| d.reasoning_tokens),
-                                token_usage.total_tokens,
-                            );
+                let mut completed = response_completed.take();
+                if completed.is_none()
+                    && let Some(fallback_ctx) = fallback.as_ref()
+                    && fallback_ctx.provider.is_azure_responses_endpoint()
+                    && let Some(response_id) = response_created_id.as_deref()
+                {
+                    match fallback_ctx.fetch_completion(response_id).await {
+                        Ok(resp) => {
+                            completed = Some(resp);
                         }
-                        let event = ResponseEvent::Completed {
-                            response_id,
-                            token_usage: usage.map(Into::into),
-                        };
-                        let _ = tx_event.send(Ok(event)).await;
+                        Err(err) => {
+                            response_completion_fallback_error = Some(err);
+                        }
                     }
-                    None => {
-                        let error = response_error.unwrap_or(CodexErr::Stream(
-                            "stream closed before response.completed".into(),
-                            None,
-                        ));
-                        otel_event_manager.see_event_completed_failed(&error);
+                }
 
-                        let _ = tx_event.send(Err(error)).await;
+                if let Some(ResponseCompleted {
+                    id: response_id,
+                    usage,
+                }) = completed
+                {
+                    if let Some(token_usage) = &usage {
+                        otel_event_manager.sse_event_completed(
+                            token_usage.input_tokens,
+                            token_usage.output_tokens,
+                            token_usage
+                                .input_tokens_details
+                                .as_ref()
+                                .map(|d| d.cached_tokens),
+                            token_usage
+                                .output_tokens_details
+                                .as_ref()
+                                .map(|d| d.reasoning_tokens),
+                            token_usage.total_tokens,
+                        );
                     }
+                    let event = ResponseEvent::Completed {
+                        response_id,
+                        token_usage: usage.map(Into::into),
+                    };
+                    let _ = tx_event.send(Ok(event)).await;
+                } else if let Some(response_id) = response_created_id.take() {
+                    if let Some(err) = response_completion_fallback_error.as_ref() {
+                        warn!(
+                            ?err,
+                            "failed to fetch response completion after stream ended; continuing without token usage"
+                        );
+                    }
+                    let event = ResponseEvent::Completed {
+                        response_id,
+                        token_usage: None,
+                    };
+                    let _ = tx_event.send(Ok(event)).await;
+                } else {
+                    let error = response_error.unwrap_or(CodexErr::Stream(
+                        "stream closed before response.completed".into(),
+                        None,
+                    ));
+                    otel_event_manager.see_event_completed_failed(&error);
+
+                    let _ = tx_event.send(Err(error)).await;
                 }
                 return;
             }
@@ -810,7 +931,11 @@ async fn process_sse<S>(
                 }
             }
             "response.created" => {
-                if event.response.is_some() {
+                if let Some(resp_val) = event.response.clone() {
+                    if let Ok(created) = serde_json::from_value::<ResponseCreated>(resp_val)
+                        && let Some(id) = created.id {
+                            response_created_id = Some(id);
+                        }
                     let _ = tx_event.send(Ok(ResponseEvent::Created {})).await;
                 }
             }
@@ -920,6 +1045,7 @@ async fn stream_from_fixture(
         tx_event,
         provider.stream_idle_timeout(),
         otel_event_manager,
+        None,
     ));
     Ok(ResponseStream { rx_event })
 }
@@ -970,6 +1096,11 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_test::io::Builder as IoBuilder;
     use tokio_util::io::ReaderStream;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     // ────────────────────────────
     // Helpers
@@ -995,6 +1126,7 @@ mod tests {
             tx,
             provider.stream_idle_timeout(),
             otel_event_manager,
+            None,
         ));
 
         let mut events = Vec::new();
@@ -1010,6 +1142,15 @@ mod tests {
         events: Vec<serde_json::Value>,
         provider: ModelProviderInfo,
         otel_event_manager: OtelEventManager,
+    ) -> Vec<ResponseEvent> {
+        run_sse_with_fallback(events, provider, otel_event_manager, None).await
+    }
+
+    async fn run_sse_with_fallback(
+        events: Vec<serde_json::Value>,
+        provider: ModelProviderInfo,
+        otel_event_manager: OtelEventManager,
+        fallback: Option<ResponsesCompletionFallback>,
     ) -> Vec<ResponseEvent> {
         let mut body = String::new();
         for e in events {
@@ -1031,6 +1172,7 @@ mod tests {
             tx,
             provider.stream_idle_timeout(),
             otel_event_manager,
+            fallback,
         ));
 
         let mut out = Vec::new();
@@ -1182,6 +1324,93 @@ mod tests {
                 assert_eq!(msg, "stream closed before response.completed")
             }
             other => panic!("unexpected second event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn azure_missing_completed_fetches_usage_via_fallback() {
+        let server = MockServer::start().await;
+        let response_body = json!({
+            "id": "resp-1",
+            "status": "completed",
+            "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 3},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 4},
+                "total_tokens": 30
+            }
+        });
+
+        let _guard = Mock::given(method("GET"))
+            .and(path("/responses/resp-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .expect(1)
+            .mount_as_scoped(&server)
+            .await;
+
+        let provider = ModelProviderInfo {
+            name: "Azure".to_string(),
+            base_url: Some(server.uri()),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            requires_openai_auth: false,
+        };
+
+        let fallback =
+            ResponsesCompletionFallback::new(provider.clone(), reqwest::Client::new(), None);
+
+        let events = run_sse_with_fallback(
+            vec![
+                json!({
+                    "type": "response.created",
+                    "response": {"id": "resp-1"}
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "id": "msg-1",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Hello"}]
+                    }
+                }),
+            ],
+            provider,
+            otel_event_manager(),
+            Some(fallback),
+        )
+        .await;
+
+        assert_eq!(events.len(), 3);
+        assert_matches!(&events[0], ResponseEvent::Created);
+        assert_matches!(
+            &events[1],
+            ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }) if role == "assistant"
+        );
+
+        match &events[2] {
+            ResponseEvent::Completed {
+                response_id,
+                token_usage,
+            } => {
+                assert_eq!(response_id, "resp-1");
+                let usage = token_usage.as_ref().expect("token usage present");
+                assert_eq!(usage.input_tokens, 10);
+                assert_eq!(usage.cached_input_tokens, 3);
+                assert_eq!(usage.output_tokens, 20);
+                assert_eq!(usage.reasoning_output_tokens, 4);
+                assert_eq!(usage.total_tokens, 30);
+            }
+            other => panic!("expected completed event, got {other:?}"),
         }
     }
 

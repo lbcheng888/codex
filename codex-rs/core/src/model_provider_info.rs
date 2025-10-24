@@ -7,6 +7,7 @@
 
 use crate::CodexAuth;
 use codex_app_server_protocol::AuthMode;
+use reqwest::Method;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -107,6 +108,28 @@ impl ModelProviderInfo {
         client: &'a reqwest::Client,
         auth: &Option<CodexAuth>,
     ) -> crate::error::Result<reqwest::RequestBuilder> {
+        self.create_request_builder_with_method(client, auth, Method::POST, None)
+            .await
+    }
+
+    pub async fn create_request_builder_with_method<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        auth: &Option<CodexAuth>,
+        method: Method,
+        path_suffix: Option<&str>,
+    ) -> crate::error::Result<reqwest::RequestBuilder> {
+        self.create_request_builder_internal(client, auth, method, path_suffix)
+            .await
+    }
+
+    async fn create_request_builder_internal<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        auth: &Option<CodexAuth>,
+        method: Method,
+        path_suffix: Option<&str>,
+    ) -> crate::error::Result<reqwest::RequestBuilder> {
         let effective_auth = if let Some(secret_key) = &self.experimental_bearer_token {
             Some(CodexAuth::from_api_key(secret_key))
         } else {
@@ -123,9 +146,20 @@ impl ModelProviderInfo {
             }
         };
 
-        let url = self.get_full_url(&effective_auth);
+        let mut url = self.get_full_url(&effective_auth);
 
-        let mut builder = client.post(url);
+        if let Some(suffix) = path_suffix {
+            let trimmed = suffix.trim_start_matches('/');
+            if !trimmed.is_empty() {
+                if let Some((base, query)) = url.split_once('?') {
+                    url = format!("{base}/{trimmed}?{query}");
+                } else {
+                    url = format!("{url}/{trimmed}");
+                }
+            }
+        }
+
+        let mut builder = client.request(method, url);
 
         if let Some(auth) = effective_auth.as_ref() {
             builder = builder.bearer_auth(auth.get_token().await?);
