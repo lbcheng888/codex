@@ -6,6 +6,8 @@
 //!      key. These override or extend the defaults at runtime.
 
 use crate::CodexAuth;
+use crate::default_client::CodexHttpClient;
+use crate::default_client::CodexRequestBuilder;
 use codex_app_server_protocol::AuthMode;
 use reqwest::Method;
 use serde::Deserialize;
@@ -96,7 +98,7 @@ pub struct ModelProviderInfo {
 
 impl ModelProviderInfo {
     /// Construct a `POST` RequestBuilder for the given URL using the provided
-    /// reqwest Client applying:
+    /// [`CodexHttpClient`] applying:
     ///   • provider-specific headers (static + env based)
     ///   • Bearer auth header when an API key is available.
     ///   • Auth token for OAuth.
@@ -105,31 +107,31 @@ impl ModelProviderInfo {
     /// one produced by [`ModelProviderInfo::api_key`].
     pub async fn create_request_builder<'a>(
         &'a self,
-        client: &'a reqwest::Client,
+        client: &'a CodexHttpClient,
         auth: &Option<CodexAuth>,
-    ) -> crate::error::Result<reqwest::RequestBuilder> {
+    ) -> crate::error::Result<CodexRequestBuilder> {
         self.create_request_builder_with_method(client, auth, Method::POST, None)
             .await
     }
 
     pub async fn create_request_builder_with_method<'a>(
         &'a self,
-        client: &'a reqwest::Client,
+        client: &'a CodexHttpClient,
         auth: &Option<CodexAuth>,
         method: Method,
         path_suffix: Option<&str>,
-    ) -> crate::error::Result<reqwest::RequestBuilder> {
+    ) -> crate::error::Result<CodexRequestBuilder> {
         self.create_request_builder_internal(client, auth, method, path_suffix)
             .await
     }
 
     async fn create_request_builder_internal<'a>(
         &'a self,
-        client: &'a reqwest::Client,
+        client: &'a CodexHttpClient,
         auth: &Option<CodexAuth>,
         method: Method,
         path_suffix: Option<&str>,
-    ) -> crate::error::Result<reqwest::RequestBuilder> {
+    ) -> crate::error::Result<CodexRequestBuilder> {
         let effective_auth = if let Some(secret_key) = &self.experimental_bearer_token {
             Some(CodexAuth::from_api_key(secret_key))
         } else {
@@ -221,9 +223,9 @@ impl ModelProviderInfo {
     }
 
     /// Apply provider-specific HTTP headers (both static and environment-based)
-    /// onto an existing `reqwest::RequestBuilder` and return the updated
+    /// onto an existing [`CodexRequestBuilder`] and return the updated
     /// builder.
-    fn apply_http_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply_http_headers(&self, mut builder: CodexRequestBuilder) -> CodexRequestBuilder {
         if let Some(extra) = &self.http_headers {
             for (k, v) in extra {
                 builder = builder.header(k, v);
