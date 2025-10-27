@@ -12,6 +12,8 @@
   1. 如果已经收到 `response.completed`，沿用原先路径。
   2. 否则若识别为 Azure Responses 且拿到了 `response.created` 的 ID，则发起一次补抓；成功时把返回的 usage 填入 `ResponseEvent::Completed`。
   3. 若补抓失败，则记录 warning，并在保留 `response_id` 的前提下返回一个 `token_usage = None` 的 `ResponseEvent::Completed`，避免 `/compact` 直接报错。（代码位置：`codex-rs/core/src/client.rs:759-845`。）
+- **输入规范化**  
+  Azure 要求 `reasoning` 项后必须紧跟产生它的函数/消息。`sanitize_input_for_azure` 会在构建请求时剔除那些没有匹配“后继条目”的 reasoning，以防出现 `Item … was provided without its required following item` 或其反向错误（函数缺失对应 reasoning）。参见 `codex-rs/core/src/client.rs:229-255`。
 
 - **观测信号**  
   使用 `tracing::warn` 记录 fallback 抓取失败的场景，方便后续排查；成功路径仍会让 OTEL 事件携带 token usage 指标。

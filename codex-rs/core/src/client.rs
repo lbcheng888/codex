@@ -40,8 +40,8 @@ use crate::client_common::ResponsesApiRequest;
 use crate::client_common::create_reasoning_param_for_request;
 use crate::client_common::create_text_param_for_request;
 use crate::config::Config;
-use crate::default_client::create_client;
 use crate::default_client::CodexHttpClient;
+use crate::default_client::create_client;
 use crate::error::CodexErr;
 use crate::error::ConnectionFailedError;
 use crate::error::ResponseStreamFailed;
@@ -222,7 +222,12 @@ impl ModelClient {
             vec![]
         };
 
-        let input_with_instructions = prompt.get_formatted_input();
+        let azure_workaround = self.provider.is_azure_responses_endpoint();
+
+        let mut input_with_instructions = prompt.get_formatted_input();
+        if azure_workaround {
+            sanitize_input_for_azure(&mut input_with_instructions);
+        }
 
         let verbosity = match &self.config.model_family.family {
             family if family == "gpt-5" => self.config.model_verbosity,
@@ -248,8 +253,6 @@ impl ModelClient {
         // - If store = false and id is not sent an error is thrown that ID is required
         //
         // For Azure, we send `store: true` and preserve reasoning item IDs.
-        let azure_workaround = self.provider.is_azure_responses_endpoint();
-
         let payload = ResponsesApiRequest {
             model: &self.config.model,
             instructions: &full_instructions,
@@ -673,6 +676,36 @@ impl ResponsesCompletionFallback {
             usage: body.usage,
         })
     }
+}
+
+fn sanitize_input_for_azure(items: &mut Vec<ResponseItem>) {
+    if items.is_empty() {
+        return;
+    }
+
+    let mut sanitized = Vec::with_capacity(items.len());
+
+    for idx in 0..items.len() {
+        let item = &items[idx];
+        if let ResponseItem::Reasoning { .. } = item {
+            let keep = items.get(idx + 1).is_some_and(|next| {
+                matches!(
+                    next,
+                    ResponseItem::FunctionCall { .. }
+                        | ResponseItem::CustomToolCall { .. }
+                        | ResponseItem::LocalShellCall { .. }
+                        | ResponseItem::Message { .. }
+                )
+            });
+            if keep {
+                sanitized.push(item.clone());
+            }
+        } else {
+            sanitized.push(item.clone());
+        }
+    }
+
+    *items = sanitized;
 }
 
 fn attach_item_ids(payload_json: &mut Value, original_items: &[ResponseItem]) {
@@ -1368,8 +1401,7 @@ mod tests {
             requires_openai_auth: false,
         };
 
-        let fallback =
-            ResponsesCompletionFallback::new(provider.clone(), create_client(), None);
+        let fallback = ResponsesCompletionFallback::new(provider.clone(), create_client(), None);
 
         let events = run_sse_with_fallback(
             vec![
