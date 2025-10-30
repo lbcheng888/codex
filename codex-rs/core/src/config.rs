@@ -1,3 +1,4 @@
+use crate::auth::AuthCredentialsStoreMode;
 use crate::config_loader::LoadedConfigLayers;
 pub use crate::config_loader::load_config_as_toml;
 use crate::config_loader::load_config_layers_with_overrides;
@@ -6,7 +7,6 @@ use crate::config_profile::ConfigProfile;
 use crate::config_types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config_types::History;
 use crate::config_types::McpServerConfig;
-use crate::config_types::McpServerTransportConfig;
 use crate::config_types::Notice;
 use crate::config_types::Notifications;
 use crate::config_types::OtelConfig;
@@ -33,7 +33,6 @@ use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
-use anyhow::Context;
 use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -52,12 +51,8 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 
-use tempfile::NamedTempFile;
 use toml::Value as TomlValue;
-use toml_edit::Array as TomlArray;
 use toml_edit::DocumentMut;
-use toml_edit::Item as TomlItem;
-use toml_edit::Table as TomlTable;
 
 #[cfg(target_os = "windows")]
 pub const OPENAI_DEFAULT_MODEL: &str = "gpt-5";
@@ -108,6 +103,10 @@ pub struct Config {
     /// for either of approval_policy or sandbox_mode.
     pub did_user_set_custom_approval_policy_or_sandbox_mode: bool,
 
+    /// On Windows, indicates that a previously configured workspace-write sandbox
+    /// was coerced to read-only because native auto mode is unsupported.
+    pub forced_auto_mode_downgraded_on_windows: bool,
+
     pub shell_environment_policy: ShellEnvironmentPolicy,
 
     /// When `true`, `AgentReasoning` events emitted by the backend will be
@@ -155,6 +154,12 @@ pub struct Config {
     /// for the session. All relative paths inside the business-logic layer are
     /// resolved against this path.
     pub cwd: PathBuf,
+
+    /// Preferred store for CLI auth credentials.
+    /// file (default): Use a file in the Codex home directory.
+    /// keyring: Use an OS-specific keyring service.
+    /// auto: Use the OS-specific keyring service if available, otherwise use a file.
+    pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: HashMap<String, McpServerConfig>,
@@ -372,141 +377,10 @@ fn ensure_no_inline_bearer_tokens(value: &TomlValue) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn write_global_mcp_servers(
-    codex_home: &Path,
-    servers: &BTreeMap<String, McpServerConfig>,
-) -> std::io::Result<()> {
-    let config_path = codex_home.join(CONFIG_TOML_FILE);
-    let mut doc = match std::fs::read_to_string(&config_path) {
-        Ok(contents) => contents
-            .parse::<DocumentMut>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
-        Err(e) => return Err(e),
-    };
-
-    doc.as_table_mut().remove("mcp_servers");
-
-    if !servers.is_empty() {
-        let mut table = TomlTable::new();
-        table.set_implicit(true);
-        doc["mcp_servers"] = TomlItem::Table(table);
-
-        for (name, config) in servers {
-            let mut entry = TomlTable::new();
-            entry.set_implicit(false);
-            match &config.transport {
-                McpServerTransportConfig::Stdio {
-                    command,
-                    args,
-                    env,
-                    env_vars,
-                    cwd,
-                } => {
-                    entry["command"] = toml_edit::value(command.clone());
-
-                    if !args.is_empty() {
-                        let mut args_array = TomlArray::new();
-                        for arg in args {
-                            args_array.push(arg.clone());
-                        }
-                        entry["args"] = TomlItem::Value(args_array.into());
-                    }
-
-                    if let Some(env) = env
-                        && !env.is_empty()
-                    {
-                        let mut env_table = TomlTable::new();
-                        env_table.set_implicit(false);
-                        let mut pairs: Vec<_> = env.iter().collect();
-                        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-                        for (key, value) in pairs {
-                            env_table.insert(key, toml_edit::value(value.clone()));
-                        }
-                        entry["env"] = TomlItem::Table(env_table);
-                    }
-
-                    if !env_vars.is_empty() {
-                        entry["env_vars"] =
-                            TomlItem::Value(env_vars.iter().collect::<TomlArray>().into());
-                    }
-
-                    if let Some(cwd) = cwd {
-                        entry["cwd"] = toml_edit::value(cwd.to_string_lossy().to_string());
-                    }
-                }
-                McpServerTransportConfig::StreamableHttp {
-                    url,
-                    bearer_token_env_var,
-                    http_headers,
-                    env_http_headers,
-                } => {
-                    entry["url"] = toml_edit::value(url.clone());
-                    if let Some(env_var) = bearer_token_env_var {
-                        entry["bearer_token_env_var"] = toml_edit::value(env_var.clone());
-                    }
-                    if let Some(headers) = http_headers
-                        && !headers.is_empty()
-                    {
-                        let mut table = TomlTable::new();
-                        table.set_implicit(false);
-                        let mut pairs: Vec<_> = headers.iter().collect();
-                        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-                        for (key, value) in pairs {
-                            table.insert(key, toml_edit::value(value.clone()));
-                        }
-                        entry["http_headers"] = TomlItem::Table(table);
-                    }
-                    if let Some(headers) = env_http_headers
-                        && !headers.is_empty()
-                    {
-                        let mut table = TomlTable::new();
-                        table.set_implicit(false);
-                        let mut pairs: Vec<_> = headers.iter().collect();
-                        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-                        for (key, value) in pairs {
-                            table.insert(key, toml_edit::value(value.clone()));
-                        }
-                        entry["env_http_headers"] = TomlItem::Table(table);
-                    }
-                }
-            }
-
-            if !config.enabled {
-                entry["enabled"] = toml_edit::value(false);
-            }
-
-            if let Some(timeout) = config.startup_timeout_sec {
-                entry["startup_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
-            }
-
-            if let Some(timeout) = config.tool_timeout_sec {
-                entry["tool_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
-            }
-
-            if let Some(enabled_tools) = &config.enabled_tools {
-                entry["enabled_tools"] =
-                    TomlItem::Value(enabled_tools.iter().collect::<TomlArray>().into());
-            }
-
-            if let Some(disabled_tools) = &config.disabled_tools {
-                entry["disabled_tools"] =
-                    TomlItem::Value(disabled_tools.iter().collect::<TomlArray>().into());
-            }
-
-            doc["mcp_servers"][name.as_str()] = TomlItem::Table(entry);
-        }
-    }
-
-    std::fs::create_dir_all(codex_home)?;
-    let tmp_file = NamedTempFile::new_in(codex_home)?;
-    std::fs::write(tmp_file.path(), doc.to_string())?;
-    tmp_file.persist(config_path).map_err(|err| err.error)?;
-
-    Ok(())
-}
-
-fn set_project_trusted_inner(doc: &mut DocumentMut, project_path: &Path) -> anyhow::Result<()> {
+pub(crate) fn set_project_trusted_inner(
+    doc: &mut DocumentMut,
+    project_path: &Path,
+) -> anyhow::Result<()> {
     // Ensure we render a human-friendly structure:
     //
     // [projects]
@@ -574,209 +448,11 @@ fn set_project_trusted_inner(doc: &mut DocumentMut, project_path: &Path) -> anyh
 /// Patch `CODEX_HOME/config.toml` project state.
 /// Use with caution.
 pub fn set_project_trusted(codex_home: &Path, project_path: &Path) -> anyhow::Result<()> {
-    let config_path = codex_home.join(CONFIG_TOML_FILE);
-    // Parse existing config if present; otherwise start a new document.
-    let mut doc = match std::fs::read_to_string(config_path.clone()) {
-        Ok(s) => s.parse::<DocumentMut>()?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
-        Err(e) => return Err(e.into()),
-    };
+    use crate::config_edit::ConfigEditsBuilder;
 
-    set_project_trusted_inner(&mut doc, project_path)?;
-
-    // ensure codex_home exists
-    std::fs::create_dir_all(codex_home)?;
-
-    // create a tmp_file
-    let tmp_file = NamedTempFile::new_in(codex_home)?;
-    std::fs::write(tmp_file.path(), doc.to_string())?;
-
-    // atomically move the tmp file into config.toml
-    tmp_file.persist(config_path)?;
-
-    Ok(())
-}
-
-/// Persist the acknowledgement flag for the Windows onboarding screen.
-pub fn set_windows_wsl_setup_acknowledged(
-    codex_home: &Path,
-    acknowledged: bool,
-) -> anyhow::Result<()> {
-    let config_path = codex_home.join(CONFIG_TOML_FILE);
-    let mut doc = match std::fs::read_to_string(config_path.clone()) {
-        Ok(s) => s.parse::<DocumentMut>()?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
-        Err(e) => return Err(e.into()),
-    };
-
-    doc["windows_wsl_setup_acknowledged"] = toml_edit::value(acknowledged);
-
-    std::fs::create_dir_all(codex_home)?;
-
-    let tmp_file = NamedTempFile::new_in(codex_home)?;
-    std::fs::write(tmp_file.path(), doc.to_string())?;
-    tmp_file.persist(config_path)?;
-
-    Ok(())
-}
-
-/// Persist the acknowledgement flag for the full access warning prompt.
-pub fn set_hide_full_access_warning(codex_home: &Path, acknowledged: bool) -> anyhow::Result<()> {
-    let config_path = codex_home.join(CONFIG_TOML_FILE);
-    let mut doc = match std::fs::read_to_string(config_path.clone()) {
-        Ok(s) => s.parse::<DocumentMut>()?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
-        Err(e) => return Err(e.into()),
-    };
-
-    let notices_table = load_or_create_top_level_table(&mut doc, Notice::TABLE_KEY)?;
-
-    notices_table["hide_full_access_warning"] = toml_edit::value(acknowledged);
-
-    std::fs::create_dir_all(codex_home)?;
-    let tmp_file = NamedTempFile::new_in(codex_home)?;
-    std::fs::write(tmp_file.path(), doc.to_string())?;
-    tmp_file.persist(config_path)?;
-
-    Ok(())
-}
-
-fn load_or_create_top_level_table<'a>(
-    doc: &'a mut DocumentMut,
-    key: &str,
-) -> anyhow::Result<&'a mut toml_edit::Table> {
-    let mut created_table = false;
-
-    let root = doc.as_table_mut();
-    let needs_table =
-        !root.contains_key(key) || root.get(key).and_then(|item| item.as_table()).is_none();
-    if needs_table {
-        root.insert(key, toml_edit::table());
-        created_table = true;
-    }
-
-    let Some(table) = doc[key].as_table_mut() else {
-        return Err(anyhow::anyhow!(format!(
-            "table [{key}] missing after initialization"
-        )));
-    };
-
-    if created_table {
-        table.set_implicit(true);
-    }
-
-    Ok(table)
-}
-
-fn ensure_profile_table<'a>(
-    doc: &'a mut DocumentMut,
-    profile_name: &str,
-) -> anyhow::Result<&'a mut toml_edit::Table> {
-    let mut created_profiles_table = false;
-    {
-        let root = doc.as_table_mut();
-        let needs_table = !root.contains_key("profiles")
-            || root
-                .get("profiles")
-                .and_then(|item| item.as_table())
-                .is_none();
-        if needs_table {
-            root.insert("profiles", toml_edit::table());
-            created_profiles_table = true;
-        }
-    }
-
-    let Some(profiles_table) = doc["profiles"].as_table_mut() else {
-        return Err(anyhow::anyhow!(
-            "profiles table missing after initialization"
-        ));
-    };
-
-    if created_profiles_table {
-        profiles_table.set_implicit(true);
-    }
-
-    let needs_profile_table = !profiles_table.contains_key(profile_name)
-        || profiles_table
-            .get(profile_name)
-            .and_then(|item| item.as_table())
-            .is_none();
-    if needs_profile_table {
-        profiles_table.insert(profile_name, toml_edit::table());
-    }
-
-    let Some(profile_table) = profiles_table
-        .get_mut(profile_name)
-        .and_then(|item| item.as_table_mut())
-    else {
-        return Err(anyhow::anyhow!(format!(
-            "profile table missing for {profile_name}"
-        )));
-    };
-
-    profile_table.set_implicit(false);
-    Ok(profile_table)
-}
-
-// TODO(jif) refactor config persistence.
-pub async fn persist_model_selection(
-    codex_home: &Path,
-    active_profile: Option<&str>,
-    model: &str,
-    effort: Option<ReasoningEffort>,
-) -> anyhow::Result<()> {
-    let config_path = codex_home.join(CONFIG_TOML_FILE);
-    let serialized = match tokio::fs::read_to_string(&config_path).await {
-        Ok(contents) => contents,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err.into()),
-    };
-
-    let mut doc = if serialized.is_empty() {
-        DocumentMut::new()
-    } else {
-        serialized.parse::<DocumentMut>()?
-    };
-
-    if let Some(profile_name) = active_profile {
-        let profile_table = ensure_profile_table(&mut doc, profile_name)?;
-        profile_table["model"] = toml_edit::value(model);
-        match effort {
-            Some(effort) => {
-                profile_table["model_reasoning_effort"] = toml_edit::value(effort.to_string());
-            }
-            None => {
-                profile_table.remove("model_reasoning_effort");
-            }
-        }
-    } else {
-        let table = doc.as_table_mut();
-        table["model"] = toml_edit::value(model);
-        match effort {
-            Some(effort) => {
-                table["model_reasoning_effort"] = toml_edit::value(effort.to_string());
-            }
-            None => {
-                table.remove("model_reasoning_effort");
-            }
-        }
-    }
-
-    // TODO(jif) refactor the home creation
-    tokio::fs::create_dir_all(codex_home)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create Codex home directory at {}",
-                codex_home.display()
-            )
-        })?;
-
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .with_context(|| format!("failed to persist config.toml at {}", config_path.display()))?;
-
-    Ok(())
+    ConfigEditsBuilder::new(codex_home)
+        .set_project_trusted(project_path)
+        .apply_blocking()
 }
 
 /// Apply a single dotted-path override onto a TOML value.
@@ -868,6 +544,13 @@ pub struct ConfigToml {
     /// When set, restricts the login mechanism users may use.
     #[serde(default)]
     pub forced_login_method: Option<ForcedLoginMethod>,
+
+    /// Preferred backend for storing CLI auth credentials.
+    /// file (default): Use a file in the Codex home directory.
+    /// keyring: Use an OS-specific keyring service.
+    /// auto: Use the keyring if available, otherwise use a file.
+    #[serde(default)]
+    pub cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     #[serde(default)]
@@ -1022,6 +705,12 @@ impl From<ToolsToml> for Tools {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct SandboxPolicyResolution {
+    pub policy: SandboxPolicy,
+    pub forced_auto_mode_downgraded_on_windows: bool,
+}
+
 impl ConfigToml {
     /// Derive the effective sandbox policy from the configuration.
     fn derive_sandbox_policy(
@@ -1029,7 +718,7 @@ impl ConfigToml {
         sandbox_mode_override: Option<SandboxMode>,
         profile_sandbox_mode: Option<SandboxMode>,
         resolved_cwd: &Path,
-    ) -> SandboxPolicy {
+    ) -> SandboxPolicyResolution {
         let resolved_sandbox_mode = sandbox_mode_override
             .or(profile_sandbox_mode)
             .or(self.sandbox_mode)
@@ -1044,7 +733,7 @@ impl ConfigToml {
                 })
             })
             .unwrap_or_default();
-        match resolved_sandbox_mode {
+        let mut sandbox_policy = match resolved_sandbox_mode {
             SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
             SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
                 Some(SandboxWorkspaceWrite {
@@ -1061,6 +750,17 @@ impl ConfigToml {
                 None => SandboxPolicy::new_workspace_write_policy(),
             },
             SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
+        };
+        let mut forced_auto_mode_downgraded_on_windows = false;
+        if cfg!(target_os = "windows")
+            && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
+        {
+            sandbox_policy = SandboxPolicy::new_read_only_policy();
+            forced_auto_mode_downgraded_on_windows = true;
+        }
+        SandboxPolicyResolution {
+            policy: sandbox_policy,
+            forced_auto_mode_downgraded_on_windows,
         }
     }
 
@@ -1221,8 +921,10 @@ impl Config {
             .get_active_project(&resolved_cwd)
             .unwrap_or(ProjectConfig { trust_level: None });
 
-        let mut sandbox_policy =
-            cfg.derive_sandbox_policy(sandbox_mode, config_profile.sandbox_mode, &resolved_cwd);
+        let SandboxPolicyResolution {
+            policy: mut sandbox_policy,
+            forced_auto_mode_downgraded_on_windows,
+        } = cfg.derive_sandbox_policy(sandbox_mode, config_profile.sandbox_mode, &resolved_cwd);
         if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
             for path in additional_writable_roots {
                 if !writable_roots.iter().any(|existing| existing == &path) {
@@ -1353,10 +1055,14 @@ impl Config {
             approval_policy,
             sandbox_policy,
             did_user_set_custom_approval_policy_or_sandbox_mode,
+            forced_auto_mode_downgraded_on_windows,
             shell_environment_policy,
             notify: cfg.notify,
             user_instructions,
             base_instructions,
+            // The config.toml omits "_mode" because it's a config file. However, "_mode"
+            // is important in code to differentiate the mode from the store implementation.
+            cli_auth_credentials_store_mode: cfg.cli_auth_credentials_store.unwrap_or_default(),
             mcp_servers: cfg.mcp_servers,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
@@ -1538,7 +1244,11 @@ pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use crate::config_edit::ConfigEdit;
+    use crate::config_edit::ConfigEditsBuilder;
+    use crate::config_edit::apply_blocking;
     use crate::config_types::HistoryPersistence;
+    use crate::config_types::McpServerTransportConfig;
     use crate::config_types::Notifications;
     use crate::features::Feature;
 
@@ -1604,13 +1314,17 @@ network_access = false  # This should be ignored.
         let sandbox_full_access_cfg = toml::from_str::<ConfigToml>(sandbox_full_access)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
+        let resolution = sandbox_full_access_cfg.derive_sandbox_policy(
+            sandbox_mode_override,
+            None,
+            &PathBuf::from("/tmp/test"),
+        );
         assert_eq!(
-            SandboxPolicy::DangerFullAccess,
-            sandbox_full_access_cfg.derive_sandbox_policy(
-                sandbox_mode_override,
-                None,
-                &PathBuf::from("/tmp/test")
-            )
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::DangerFullAccess,
+                forced_auto_mode_downgraded_on_windows: false,
+            }
         );
 
         let sandbox_read_only = r#"
@@ -1623,13 +1337,17 @@ network_access = true  # This should be ignored.
         let sandbox_read_only_cfg = toml::from_str::<ConfigToml>(sandbox_read_only)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
+        let resolution = sandbox_read_only_cfg.derive_sandbox_policy(
+            sandbox_mode_override,
+            None,
+            &PathBuf::from("/tmp/test"),
+        );
         assert_eq!(
-            SandboxPolicy::ReadOnly,
-            sandbox_read_only_cfg.derive_sandbox_policy(
-                sandbox_mode_override,
-                None,
-                &PathBuf::from("/tmp/test")
-            )
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::ReadOnly,
+                forced_auto_mode_downgraded_on_windows: false,
+            }
         );
 
         let sandbox_workspace_write = r#"
@@ -1646,19 +1364,33 @@ exclude_slash_tmp = true
         let sandbox_workspace_write_cfg = toml::from_str::<ConfigToml>(sandbox_workspace_write)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
-        assert_eq!(
-            SandboxPolicy::WorkspaceWrite {
-                writable_roots: vec![PathBuf::from("/my/workspace")],
-                network_access: false,
-                exclude_tmpdir_env_var: true,
-                exclude_slash_tmp: true,
-            },
-            sandbox_workspace_write_cfg.derive_sandbox_policy(
-                sandbox_mode_override,
-                None,
-                &PathBuf::from("/tmp/test")
-            )
+        let resolution = sandbox_workspace_write_cfg.derive_sandbox_policy(
+            sandbox_mode_override,
+            None,
+            &PathBuf::from("/tmp/test"),
         );
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::ReadOnly,
+                    forced_auto_mode_downgraded_on_windows: true,
+                }
+            );
+        } else {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::WorkspaceWrite {
+                        writable_roots: vec![PathBuf::from("/my/workspace")],
+                        network_access: false,
+                        exclude_tmpdir_env_var: true,
+                        exclude_slash_tmp: true,
+                    },
+                    forced_auto_mode_downgraded_on_windows: false,
+                }
+            );
+        }
 
         let sandbox_workspace_write = r#"
 sandbox_mode = "workspace-write"
@@ -1677,19 +1409,33 @@ trust_level = "trusted"
         let sandbox_workspace_write_cfg = toml::from_str::<ConfigToml>(sandbox_workspace_write)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
-        assert_eq!(
-            SandboxPolicy::WorkspaceWrite {
-                writable_roots: vec![PathBuf::from("/my/workspace")],
-                network_access: false,
-                exclude_tmpdir_env_var: true,
-                exclude_slash_tmp: true,
-            },
-            sandbox_workspace_write_cfg.derive_sandbox_policy(
-                sandbox_mode_override,
-                None,
-                &PathBuf::from("/tmp/test")
-            )
+        let resolution = sandbox_workspace_write_cfg.derive_sandbox_policy(
+            sandbox_mode_override,
+            None,
+            &PathBuf::from("/tmp/test"),
         );
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::ReadOnly,
+                    forced_auto_mode_downgraded_on_windows: true,
+                }
+            );
+        } else {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::WorkspaceWrite {
+                        writable_roots: vec![PathBuf::from("/my/workspace")],
+                        network_access: false,
+                        exclude_tmpdir_env_var: true,
+                        exclude_slash_tmp: true,
+                    },
+                    forced_auto_mode_downgraded_on_windows: false,
+                }
+            );
+        }
     }
 
     #[test]
@@ -1714,20 +1460,72 @@ trust_level = "trusted"
         )?;
 
         let expected_backend = canonicalize(&backend).expect("canonicalize backend directory");
-        match config.sandbox_policy {
-            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-                assert_eq!(
-                    writable_roots
-                        .iter()
-                        .filter(|root| **root == expected_backend)
-                        .count(),
-                    1,
-                    "expected single writable root entry for {}",
-                    expected_backend.display()
-                );
+        if cfg!(target_os = "windows") {
+            assert!(
+                config.forced_auto_mode_downgraded_on_windows,
+                "expected workspace-write request to be downgraded on Windows"
+            );
+            match config.sandbox_policy {
+                SandboxPolicy::ReadOnly => {}
+                other => panic!("expected read-only policy on Windows, got {other:?}"),
             }
-            other => panic!("expected workspace-write policy, got {other:?}"),
+        } else {
+            match config.sandbox_policy {
+                SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
+                    assert_eq!(
+                        writable_roots
+                            .iter()
+                            .filter(|root| **root == expected_backend)
+                            .count(),
+                        1,
+                        "expected single writable root entry for {}",
+                        expected_backend.display()
+                    );
+                }
+                other => panic!("expected workspace-write policy, got {other:?}"),
+            }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_defaults_to_file_cli_auth_store_mode() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml::default();
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.cli_auth_credentials_store_mode,
+            AuthCredentialsStoreMode::File,
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_honors_explicit_keyring_auth_store_mode() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml {
+            cli_auth_credentials_store: Some(AuthCredentialsStoreMode::Keyring),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.cli_auth_credentials_store_mode,
+            AuthCredentialsStoreMode::Keyring,
+        );
 
         Ok(())
     }
@@ -1841,10 +1639,16 @@ trust_level = "trusted"
             codex_home.path().to_path_buf(),
         )?;
 
-        assert!(matches!(
-            config.sandbox_policy,
-            SandboxPolicy::WorkspaceWrite { .. }
-        ));
+        if cfg!(target_os = "windows") {
+            assert!(matches!(config.sandbox_policy, SandboxPolicy::ReadOnly));
+            assert!(config.forced_auto_mode_downgraded_on_windows);
+        } else {
+            assert!(matches!(
+                config.sandbox_policy,
+                SandboxPolicy::WorkspaceWrite { .. }
+            ));
+            assert!(!config.forced_auto_mode_downgraded_on_windows);
+        }
 
         Ok(())
     }
@@ -1972,7 +1776,7 @@ trust_level = "trusted"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
+    async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let mut servers = BTreeMap::new();
@@ -1994,7 +1798,11 @@ trust_level = "trusted"
             },
         );
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let loaded = load_global_mcp_servers(codex_home.path()).await?;
         assert_eq!(loaded.len(), 1);
@@ -2020,7 +1828,11 @@ trust_level = "trusted"
         assert!(docs.enabled);
 
         let empty = BTreeMap::new();
-        write_global_mcp_servers(codex_home.path(), &empty)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(empty.clone())],
+        )?;
         let loaded = load_global_mcp_servers(codex_home.path()).await?;
         assert!(loaded.is_empty());
 
@@ -2108,7 +1920,7 @@ bearer_token = "secret"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_serializes_env_sorted() -> anyhow::Result<()> {
+    async fn replace_mcp_servers_serializes_env_sorted() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let servers = BTreeMap::from([(
@@ -2132,7 +1944,11 @@ bearer_token = "secret"
             },
         )]);
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
         let serialized = std::fs::read_to_string(&config_path)?;
@@ -2175,7 +1991,7 @@ ZIG_VAR = "3"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_serializes_env_vars() -> anyhow::Result<()> {
+    async fn replace_mcp_servers_serializes_env_vars() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let servers = BTreeMap::from([(
@@ -2196,7 +2012,11 @@ ZIG_VAR = "3"
             },
         )]);
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
         let serialized = std::fs::read_to_string(&config_path)?;
@@ -2218,7 +2038,7 @@ ZIG_VAR = "3"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
+    async fn replace_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let cwd_path = PathBuf::from("/tmp/codex-mcp");
@@ -2240,7 +2060,11 @@ ZIG_VAR = "3"
             },
         )]);
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
         let serialized = std::fs::read_to_string(&config_path)?;
@@ -2262,8 +2086,7 @@ ZIG_VAR = "3"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_streamable_http_serializes_bearer_token() -> anyhow::Result<()>
-    {
+    async fn replace_mcp_servers_streamable_http_serializes_bearer_token() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let servers = BTreeMap::from([(
@@ -2283,7 +2106,11 @@ ZIG_VAR = "3"
             },
         )]);
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
         let serialized = std::fs::read_to_string(&config_path)?;
@@ -2318,8 +2145,7 @@ startup_timeout_sec = 2.0
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_streamable_http_serializes_custom_headers()
-    -> anyhow::Result<()> {
+    async fn replace_mcp_servers_streamable_http_serializes_custom_headers() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let servers = BTreeMap::from([(
@@ -2341,7 +2167,11 @@ startup_timeout_sec = 2.0
                 disabled_tools: None,
             },
         )]);
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
         let serialized = std::fs::read_to_string(&config_path)?;
@@ -2387,8 +2217,7 @@ X-Auth = "DOCS_AUTH"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_streamable_http_removes_optional_sections()
-    -> anyhow::Result<()> {
+    async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
@@ -2413,7 +2242,11 @@ X-Auth = "DOCS_AUTH"
             },
         )]);
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
         let serialized_with_optional = std::fs::read_to_string(&config_path)?;
         assert!(serialized_with_optional.contains("bearer_token_env_var = \"MCP_TOKEN\""));
         assert!(serialized_with_optional.contains("[mcp_servers.docs.http_headers]"));
@@ -2435,7 +2268,11 @@ X-Auth = "DOCS_AUTH"
                 disabled_tools: None,
             },
         );
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let serialized = std::fs::read_to_string(&config_path)?;
         assert_eq!(
@@ -2468,7 +2305,7 @@ url = "https://example.com/mcp"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_streamable_http_isolates_headers_between_servers()
+    async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers()
     -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
@@ -2515,7 +2352,11 @@ url = "https://example.com/mcp"
             ),
         ]);
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let serialized = std::fs::read_to_string(&config_path)?;
         assert!(
@@ -2569,7 +2410,7 @@ url = "https://example.com/mcp"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_serializes_disabled_flag() -> anyhow::Result<()> {
+    async fn replace_mcp_servers_serializes_disabled_flag() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let servers = BTreeMap::from([(
@@ -2590,7 +2431,11 @@ url = "https://example.com/mcp"
             },
         )]);
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
         let serialized = std::fs::read_to_string(&config_path)?;
@@ -2607,7 +2452,7 @@ url = "https://example.com/mcp"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_serializes_tool_filters() -> anyhow::Result<()> {
+    async fn replace_mcp_servers_serializes_tool_filters() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
         let servers = BTreeMap::from([(
@@ -2628,7 +2473,11 @@ url = "https://example.com/mcp"
             },
         )]);
 
-        write_global_mcp_servers(codex_home.path(), &servers)?;
+        apply_blocking(
+            codex_home.path(),
+            None,
+            &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+        )?;
 
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
         let serialized = std::fs::read_to_string(&config_path)?;
@@ -2650,16 +2499,13 @@ url = "https://example.com/mcp"
     }
 
     #[tokio::test]
-    async fn persist_model_selection_updates_defaults() -> anyhow::Result<()> {
+    async fn set_model_updates_defaults() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
-        persist_model_selection(
-            codex_home.path(),
-            None,
-            "gpt-5-codex",
-            Some(ReasoningEffort::High),
-        )
-        .await?;
+        ConfigEditsBuilder::new(codex_home.path())
+            .set_model(Some("gpt-5-codex"), Some(ReasoningEffort::High))
+            .apply()
+            .await?;
 
         let serialized =
             tokio::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE)).await?;
@@ -2672,7 +2518,7 @@ url = "https://example.com/mcp"
     }
 
     #[tokio::test]
-    async fn persist_model_selection_overwrites_existing_model() -> anyhow::Result<()> {
+    async fn set_model_overwrites_existing_model() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
 
@@ -2688,13 +2534,10 @@ model = "gpt-4.1"
         )
         .await?;
 
-        persist_model_selection(
-            codex_home.path(),
-            None,
-            "o4-mini",
-            Some(ReasoningEffort::High),
-        )
-        .await?;
+        ConfigEditsBuilder::new(codex_home.path())
+            .set_model(Some("o4-mini"), Some(ReasoningEffort::High))
+            .apply()
+            .await?;
 
         let serialized = tokio::fs::read_to_string(config_path).await?;
         let parsed: ConfigToml = toml::from_str(&serialized)?;
@@ -2713,16 +2556,14 @@ model = "gpt-4.1"
     }
 
     #[tokio::test]
-    async fn persist_model_selection_updates_profile() -> anyhow::Result<()> {
+    async fn set_model_updates_profile() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
-        persist_model_selection(
-            codex_home.path(),
-            Some("dev"),
-            "gpt-5-codex",
-            Some(ReasoningEffort::Medium),
-        )
-        .await?;
+        ConfigEditsBuilder::new(codex_home.path())
+            .with_profile(Some("dev"))
+            .set_model(Some("gpt-5-codex"), Some(ReasoningEffort::Medium))
+            .apply()
+            .await?;
 
         let serialized =
             tokio::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE)).await?;
@@ -2742,7 +2583,7 @@ model = "gpt-4.1"
     }
 
     #[tokio::test]
-    async fn persist_model_selection_updates_existing_profile() -> anyhow::Result<()> {
+    async fn set_model_updates_existing_profile() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
 
@@ -2759,13 +2600,11 @@ model = "gpt-5-codex"
         )
         .await?;
 
-        persist_model_selection(
-            codex_home.path(),
-            Some("dev"),
-            "o4-high",
-            Some(ReasoningEffort::Medium),
-        )
-        .await?;
+        ConfigEditsBuilder::new(codex_home.path())
+            .with_profile(Some("dev"))
+            .set_model(Some("o4-high"), Some(ReasoningEffort::Medium))
+            .apply()
+            .await?;
 
         let serialized = tokio::fs::read_to_string(config_path).await?;
         let parsed: ConfigToml = toml::from_str(&serialized)?;
@@ -2943,10 +2782,12 @@ model_verbosity = "high"
                 approval_policy: AskForApproval::Never,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
+                forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 user_instructions: None,
                 notify: None,
                 cwd: fixture.cwd(),
+                cli_auth_credentials_store_mode: Default::default(),
                 mcp_servers: HashMap::new(),
                 mcp_oauth_credentials_store_mode: Default::default(),
                 model_providers: fixture.model_provider_map.clone(),
@@ -3012,10 +2853,12 @@ model_verbosity = "high"
             approval_policy: AskForApproval::UnlessTrusted,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),
@@ -3096,10 +2939,12 @@ model_verbosity = "high"
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),
@@ -3166,10 +3011,12 @@ model_verbosity = "high"
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),
