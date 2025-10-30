@@ -71,9 +71,22 @@ impl ConversationHistory {
     // Returns the history prepared for sending to the model.
     // With extra response items filtered out and GhostCommits removed.
     pub(crate) fn get_history_for_prompt(&mut self) -> Vec<ResponseItem> {
+        self.get_history_for_prompt_inner(true)
+    }
+
+    pub(crate) fn get_history_for_prompt_including_reasoning(&mut self) -> Vec<ResponseItem> {
+        self.get_history_for_prompt_inner(false)
+    }
+
+    fn get_history_for_prompt_inner(
+        &mut self,
+        drop_reasoning_before_last_turn: bool,
+    ) -> Vec<ResponseItem> {
         let mut history = self.get_history();
         Self::remove_ghost_snapshots(&mut history);
-        Self::remove_reasoning_before_last_turn(&mut history);
+        if drop_reasoning_before_last_turn {
+            Self::remove_reasoning_before_last_turn(&mut history);
+        }
         history
     }
 
@@ -633,6 +646,29 @@ mod tests {
         );
         let reasoning_count = history
             .contents()
+            .iter()
+            .filter(|item| matches!(item, ResponseItem::Reasoning { .. }))
+            .count();
+        assert_eq!(reasoning_count, 3);
+    }
+
+    #[test]
+    fn get_history_for_prompt_including_reasoning_keeps_prior_reasoning() {
+        let mut history = ConversationHistory::new();
+        let items = vec![
+            user_msg("initial"),
+            reasoning("first"),
+            assistant_msg("ack"),
+            user_msg("latest"),
+            reasoning("second"),
+            assistant_msg("ack"),
+            reasoning("third"),
+        ];
+        history.record_items(items.iter());
+
+        let filtered = history.get_history_for_prompt_including_reasoning();
+        assert_eq!(filtered, items);
+        let reasoning_count = filtered
             .iter()
             .filter(|item| matches!(item, ResponseItem::Reasoning { .. }))
             .count();

@@ -84,7 +84,15 @@ async fn run_compact_task_inner(
     sess.persist_rollout_items(&[rollout_item]).await;
 
     loop {
-        let turn_input = history.get_history_for_prompt();
+        let turn_input = if turn_context
+            .client
+            .get_provider()
+            .is_azure_responses_endpoint()
+        {
+            history.get_history_for_prompt_including_reasoning()
+        } else {
+            history.get_history_for_prompt()
+        };
         let prompt = Prompt {
             input: turn_input.clone(),
             ..Default::default()

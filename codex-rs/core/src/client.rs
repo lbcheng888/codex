@@ -688,14 +688,13 @@ fn sanitize_input_for_azure(items: &mut Vec<ResponseItem>) {
     for idx in 0..items.len() {
         let item = &items[idx];
         if let ResponseItem::Reasoning { .. } = item {
-            let keep = items.get(idx + 1).is_some_and(|next| {
-                matches!(
-                    next,
-                    ResponseItem::FunctionCall { .. }
-                        | ResponseItem::CustomToolCall { .. }
-                        | ResponseItem::LocalShellCall { .. }
-                        | ResponseItem::Message { .. }
-                )
+            let keep = items.get(idx + 1).is_some_and(|next| match next {
+                ResponseItem::FunctionCall { .. }
+                | ResponseItem::CustomToolCall { .. }
+                | ResponseItem::LocalShellCall { .. }
+                | ResponseItem::WebSearchCall { .. } => true,
+                ResponseItem::Message { role, .. } => role != "user",
+                _ => false,
             });
             if keep {
                 sanitized.push(item.clone());
@@ -1122,6 +1121,8 @@ fn is_context_window_error(error: &Error) -> bool {
 mod tests {
     use super::*;
     use assert_matches::assert_matches;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ReasoningItemReasoningSummary;
     use serde_json::json;
     use tokio::sync::mpsc;
     use tokio_test::io::Builder as IoBuilder;
@@ -1652,6 +1653,75 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn sanitize_input_for_azure_drops_reasoning_before_user_message() {
+        let mut items = vec![
+            ResponseItem::Reasoning {
+                id: "reasoning-1".to_string(),
+                summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: "thinking".to_string(),
+                }],
+                content: None,
+                encrypted_content: None,
+            },
+            ResponseItem::Message {
+                id: Some("user-1".to_string()),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "hello".to_string(),
+                }],
+            },
+        ];
+
+        sanitize_input_for_azure(&mut items);
+
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, ResponseItem::Reasoning { .. })),
+            "expected reasoning item to be dropped when followed by user message, got {items:?}"
+        );
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn sanitize_input_for_azure_keeps_reasoning_before_assistant_message() {
+        let mut items = vec![
+            ResponseItem::Reasoning {
+                id: "reasoning-keep".to_string(),
+                summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: "step".to_string(),
+                }],
+                content: None,
+                encrypted_content: None,
+            },
+            ResponseItem::Message {
+                id: Some("assistant-1".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "result".to_string(),
+                }],
+            },
+            ResponseItem::Message {
+                id: Some("user-2".to_string()),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "next".to_string(),
+                }],
+            },
+        ];
+
+        sanitize_input_for_azure(&mut items);
+
+        assert!(
+            items.iter().any(
+                |item| matches!(item, ResponseItem::Reasoning { id, .. } if id == "reasoning-keep")
+            ),
+            "expected reasoning item to be retained before assistant message, got {items:?}"
+        );
+        assert_eq!(items.len(), 3);
     }
 
     #[test]

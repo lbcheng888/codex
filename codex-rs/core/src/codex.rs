@@ -1737,10 +1737,17 @@ pub(crate) async fn run_task(
             .collect::<Vec<ResponseItem>>();
 
         // Construct the input that we will send to the model.
-        let turn_input: Vec<ResponseItem> = {
-            sess.record_conversation_items(&turn_context, &pending_input)
-                .await;
-            sess.clone_history().await.get_history_for_prompt()
+        sess.record_conversation_items(&turn_context, &pending_input)
+            .await;
+        let mut history = sess.clone_history().await;
+        let turn_input: Vec<ResponseItem> = if turn_context
+            .client
+            .get_provider()
+            .is_azure_responses_endpoint()
+        {
+            history.get_history_for_prompt_including_reasoning()
+        } else {
+            history.get_history_for_prompt()
         };
 
         let turn_input_messages: Vec<String> = turn_input
