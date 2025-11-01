@@ -22,6 +22,7 @@ use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TurnAbortReason;
 use codex_core::protocol::TurnDiffEvent;
+use codex_core::protocol::WarningEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::num_format::format_with_separators;
 use owo_colors::OwoColorize;
@@ -55,6 +56,7 @@ pub(crate) struct EventProcessorWithHumanOutput {
     red: Style,
     green: Style,
     cyan: Style,
+    yellow: Style,
 
     /// Whether to include `AgentReasoning` events in the output.
     show_agent_reasoning: bool,
@@ -84,6 +86,7 @@ impl EventProcessorWithHumanOutput {
                 red: Style::new().red(),
                 green: Style::new().green(),
                 cyan: Style::new().cyan(),
+                yellow: Style::new().yellow(),
                 show_agent_reasoning: !config.hide_agent_reasoning,
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 last_message_path,
@@ -101,6 +104,7 @@ impl EventProcessorWithHumanOutput {
                 red: Style::new(),
                 green: Style::new(),
                 cyan: Style::new(),
+                yellow: Style::new(),
                 show_agent_reasoning: !config.hide_agent_reasoning,
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 last_message_path,
@@ -165,6 +169,13 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::Error(ErrorEvent { message }) => {
                 let prefix = "ERROR:".style(self.red);
                 ts_msg!(self, "{prefix} {message}");
+            }
+            EventMsg::Warning(WarningEvent { message }) => {
+                ts_msg!(
+                    self,
+                    "{} {message}",
+                    "warning:".style(self.yellow).style(self.bold)
+                );
             }
             EventMsg::DeprecationNotice(DeprecationNoticeEvent { summary, details }) => {
                 ts_msg!(
