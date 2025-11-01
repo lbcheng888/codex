@@ -39,9 +39,8 @@ pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
 ) {
-    let input = vec![UserInput::Text {
-        text: SUMMARIZATION_PROMPT.to_string(),
-    }];
+    let prompt = turn_context.compact_prompt().to_string();
+    let input = vec![UserInput::Text { text: prompt }];
     run_compact_task_inner(sess, turn_context, input).await;
 }
 
@@ -356,7 +355,8 @@ mod tests {
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
-                    text: "<user_instructions>do things</user_instructions>".to_string(),
+                    text: "# AGENTS.md instructions for project\n\n<INSTRUCTIONS>\ndo things\n</INSTRUCTIONS>"
+                        .to_string(),
                 }],
             },
             ResponseItem::Message {

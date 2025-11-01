@@ -134,14 +134,10 @@ impl ConversationHistory {
         self.items.clone()
     }
 
-    fn remove_ghost_snapshots(items: &mut Vec<ResponseItem>) {
-        items.retain(|item| !matches!(item, ResponseItem::GhostSnapshot { .. }));
-    }
-
     fn remove_reasoning_before_last_turn(items: &mut Vec<ResponseItem>) {
         // Responses API drops reasoning items before the last user message.
-        // Sending them is harmless but can lead to validation errors when switching between API organizations.
-        // https://cookbook.openai.com/examples/responses_api/reasoning_items#caching
+        // Sending them is harmless but can lead to validation errors when switching between API
+        // organizations. https://cookbook.openai.com/examples/responses_api/reasoning_items#caching
         let Some(last_user_index) = items
             .iter()
             // Use last user message as the turn boundary.
@@ -155,6 +151,10 @@ impl ConversationHistory {
             index += 1;
             keep
         });
+    }
+
+    fn remove_ghost_snapshots(items: &mut Vec<ResponseItem>) {
+        items.retain(|item| !matches!(item, ResponseItem::GhostSnapshot { .. }));
     }
 
     fn ensure_call_outputs_present(&mut self) {
@@ -541,6 +541,8 @@ mod tests {
     use codex_protocol::models::LocalShellAction;
     use codex_protocol::models::LocalShellExecAction;
     use codex_protocol::models::LocalShellStatus;
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ReasoningItemReasoningSummary;
     use pretty_assertions::assert_eq;
 
     fn assistant_msg(text: &str) -> ResponseItem {
@@ -550,15 +552,6 @@ mod tests {
             content: vec![ContentItem::OutputText {
                 text: text.to_string(),
             }],
-        }
-    }
-
-    fn reasoning(id: &str) -> ResponseItem {
-        ResponseItem::Reasoning {
-            id: id.to_string(),
-            summary: Vec::new(),
-            content: None,
-            encrypted_content: None,
         }
     }
 
@@ -575,6 +568,19 @@ mod tests {
             content: vec![ContentItem::OutputText {
                 text: text.to_string(),
             }],
+        }
+    }
+
+    fn reasoning(text: &str) -> ResponseItem {
+        ResponseItem::Reasoning {
+            id: text.to_string(),
+            summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                text: text.to_string(),
+            }],
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: text.to_string(),
+            }]),
+            encrypted_content: None,
         }
     }
 
