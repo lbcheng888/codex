@@ -693,8 +693,11 @@ fn sanitize_input_for_azure(items: &mut Vec<ResponseItem>) {
     let mut sanitized = Vec::with_capacity(items.len());
 
     for idx in 0..items.len() {
-        let item = &items[idx];
-        if let ResponseItem::Reasoning { .. } = item {
+        let mut item = items[idx].clone();
+        if let ResponseItem::Reasoning {
+            encrypted_content, ..
+        } = &mut item
+        {
             let keep = items.get(idx + 1).is_some_and(|next| match next {
                 ResponseItem::FunctionCall { .. }
                 | ResponseItem::CustomToolCall { .. }
@@ -703,11 +706,15 @@ fn sanitize_input_for_azure(items: &mut Vec<ResponseItem>) {
                 ResponseItem::Message { role, .. } => role != "user",
                 _ => false,
             });
-            if keep {
-                sanitized.push(item.clone());
+            if !keep {
+                continue;
             }
+            if encrypted_content.is_some() {
+                *encrypted_content = None;
+            }
+            sanitized.push(item);
         } else {
-            sanitized.push(item.clone());
+            sanitized.push(item);
         }
     }
 
@@ -1729,6 +1736,48 @@ mod tests {
             "expected reasoning item to be retained before assistant message, got {items:?}"
         );
         assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn sanitize_input_for_azure_strips_encrypted_reasoning_content() {
+        let mut items = vec![
+            ResponseItem::Reasoning {
+                id: "reasoning-encrypted".to_string(),
+                summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: "step".to_string(),
+                }],
+                content: None,
+                encrypted_content: Some("ciphertext".to_string()),
+            },
+            ResponseItem::Message {
+                id: Some("assistant-1".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "result".to_string(),
+                }],
+            },
+        ];
+
+        sanitize_input_for_azure(&mut items);
+
+        assert_eq!(items.len(), 2);
+
+        let reasoning = items
+            .into_iter()
+            .find(|item| matches!(item, ResponseItem::Reasoning { .. }))
+            .expect("expected reasoning item to remain");
+
+        if let ResponseItem::Reasoning {
+            encrypted_content, ..
+        } = reasoning
+        {
+            assert!(
+                encrypted_content.is_none(),
+                "expected encrypted content to be cleared for Azure"
+            );
+        } else {
+            panic!("expected reasoning item after sanitization");
+        }
     }
 
     #[test]
