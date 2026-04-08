@@ -79,6 +79,7 @@ pub mod in_process;
 mod message_processor;
 mod models;
 mod outgoing_message;
+mod rate_limit_dashboard;
 mod server_request_error;
 mod thread_state;
 mod thread_status;
@@ -531,6 +532,27 @@ pub async fn run_main_with_transport(
 
     let transport_shutdown_token = CancellationToken::new();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
+    let rate_limit_dashboard_state = match &transport {
+        AppServerTransport::WebSocket { .. } => {
+            let current_dir = std::env::current_dir()?;
+            let env_path = current_dir
+                .as_path()
+                .ancestors()
+                .map(|path| path.join(".env"))
+                .find(|path| path.is_file())
+                .unwrap_or_else(|| current_dir.join(".env"));
+            Some(rate_limit_dashboard::RateLimitDashboardRouterState {
+                service: rate_limit_dashboard::new_service(
+                    env_path,
+                    config.codex_home.join("rate_limit_dashboard_cache.json"),
+                    config.codex_home.join("rate_limit_dashboard_auth"),
+                    config.chatgpt_base_url.clone(),
+                    config.forced_chatgpt_workspace_id.clone(),
+                ),
+            })
+        }
+        AppServerTransport::Stdio | AppServerTransport::Off => None,
+    };
 
     let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
     let shutdown_when_no_connections = single_client_mode;
@@ -554,6 +576,7 @@ pub async fn run_main_with_transport(
                 transport_event_tx.clone(),
                 transport_shutdown_token.clone(),
                 policy_from_settings(&auth)?,
+                rate_limit_dashboard_state.clone(),
             )
             .await?;
             transport_accept_handles.push(accept_handle);

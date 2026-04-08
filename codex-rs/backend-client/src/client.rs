@@ -254,6 +254,21 @@ impl Client {
         Ok(preferred.unwrap_or_else(|| snapshots[0].clone()))
     }
 
+    pub async fn get_rate_limits_many_detailed(
+        &self,
+    ) -> std::result::Result<Vec<RateLimitSnapshot>, RequestError> {
+        let url = match self.path_style {
+            PathStyle::CodexApi => format!("{}/api/codex/usage", self.base_url),
+            PathStyle::ChatGptApi => format!("{}/wham/usage", self.base_url),
+        };
+        let req = self.http.get(&url).headers(self.headers());
+        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
+        let payload: RateLimitStatusPayload = self
+            .decode_json(&url, &ct, &body)
+            .map_err(RequestError::from)?;
+        Ok(Self::rate_limit_snapshots_from_payload(payload))
+    }
+
     pub async fn get_rate_limits_many(&self) -> Result<Vec<RateLimitSnapshot>> {
         let url = match self.path_style {
             PathStyle::CodexApi => format!("{}/api/codex/usage", self.base_url),

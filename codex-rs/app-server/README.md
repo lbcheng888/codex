@@ -33,6 +33,15 @@ When running with `--listen ws://IP:PORT`, the same listener also serves basic H
 - `GET /healthz` returns `200 OK` when no `Origin` header is present.
 - Any request carrying an `Origin` header is rejected with `403 Forbidden`.
 
+When the websocket listener is enabled, the same HTTP listener also serves the rate limit dashboard:
+
+- `GET /rate-limit-dashboard` serves the dashboard page.
+- `GET /rate-limit-dashboard/ws` upgrades to the dashboard websocket used by the page for live snapshots and refresh commands.
+- `GET /api/rate-limits` returns the cached/latest dashboard data.
+- `POST /api/rate-limits/refresh` refreshes all configured accounts.
+- `POST /api/rate-limits/refresh/{account}` refreshes one configured account.
+- `GET /api/rate-limits/login/{account}` opens a manual ChatGPT device-code page in a new tab. This avoids the unstable browser authorize redirect and is useful for providers like Gmail that block password automation. After the login completes, return to the dashboard and click `Refresh`.
+
 Websocket transport is currently experimental and unsupported. Do not rely on it for production workloads.
 
 Security note:

@@ -8,9 +8,12 @@ use super::next_connection_id;
 use super::serialize_outgoing_message;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::QueuedOutgoingMessage;
+use crate::rate_limit_dashboard;
+use crate::rate_limit_dashboard::RateLimitDashboardRouterState;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
+use axum::extract::Path;
 use axum::extract::State;
 use axum::extract::ws::Message as WebSocketMessage;
 use axum::extract::ws::WebSocket;
@@ -25,6 +28,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::any;
 use axum::routing::get;
+use axum::routing::post;
 use futures::SinkExt;
 use futures::StreamExt;
 use owo_colors::OwoColorize;
@@ -47,7 +51,7 @@ fn colorize(text: &str, style: Style) -> String {
 }
 
 #[allow(clippy::print_stderr)]
-fn print_websocket_startup_banner(addr: SocketAddr) {
+fn print_websocket_startup_banner(addr: SocketAddr, dashboard_enabled: bool) {
     let title = colorize("codex app-server (WebSockets)", Style::new().bold().cyan());
     let listening_label = colorize("listening on:", Style::new().dimmed());
     let listen_url = colorize(&format!("ws://{addr}"), Style::new().green());
@@ -55,11 +59,19 @@ fn print_websocket_startup_banner(addr: SocketAddr) {
     let ready_url = colorize(&format!("http://{addr}/readyz"), Style::new().green());
     let health_label = colorize("healthz:", Style::new().dimmed());
     let health_url = colorize(&format!("http://{addr}/healthz"), Style::new().green());
+    let dashboard_label = colorize("dashboard:", Style::new().dimmed());
+    let dashboard_url = colorize(
+        &format!("http://{addr}/rate-limit-dashboard"),
+        Style::new().green(),
+    );
     let note_label = colorize("note:", Style::new().dimmed());
     eprintln!("{title}");
     eprintln!("  {listening_label} {listen_url}");
     eprintln!("  {ready_label} {ready_url}");
     eprintln!("  {health_label} {health_url}");
+    if dashboard_enabled {
+        eprintln!("  {dashboard_label} {dashboard_url}");
+    }
     if addr.ip().is_loopback() {
         eprintln!(
             "  {note_label} binds localhost only (use SSH port-forwarding for remote access)"
@@ -75,6 +87,7 @@ fn print_websocket_startup_banner(addr: SocketAddr) {
 struct WebSocketListenerState {
     transport_event_tx: mpsc::Sender<TransportEvent>,
     auth_policy: Arc<WebsocketAuthPolicy>,
+    rate_limit_dashboard: Option<RateLimitDashboardRouterState>,
 }
 
 async fn health_check_handler() -> StatusCode {
@@ -85,7 +98,8 @@ async fn reject_requests_with_origin_header(
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if request.headers().contains_key(ORIGIN) {
+    let request_path = request.uri().path().to_string();
+    if request.headers().contains_key(ORIGIN) && !is_browser_safe_http_path(&request_path) {
         warn!(
             method = %request.method(),
             uri = %request.uri(),
@@ -95,6 +109,13 @@ async fn reject_requests_with_origin_header(
     } else {
         Ok(next.run(request).await)
     }
+}
+
+fn is_browser_safe_http_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/readyz" | "/healthz" | "/rate-limit-dashboard" | "/rate-limit-dashboard/ws"
+    ) || path.starts_with("/api/rate-limits")
 }
 
 async fn websocket_upgrade_handler(
@@ -120,11 +141,72 @@ async fn websocket_upgrade_handler(
         .into_response()
 }
 
+async fn dashboard_rate_limits_handler(State(state): State<WebSocketListenerState>) -> Response {
+    match state.rate_limit_dashboard {
+        Some(dashboard_state) => rate_limit_dashboard::rate_limits_handler(State(dashboard_state))
+            .await
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn dashboard_websocket_handler(
+    websocket: WebSocketUpgrade,
+    State(state): State<WebSocketListenerState>,
+) -> Response {
+    match state.rate_limit_dashboard {
+        Some(dashboard_state) => {
+            rate_limit_dashboard::dashboard_websocket_handler(websocket, State(dashboard_state))
+                .await
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn dashboard_refresh_all_handler(State(state): State<WebSocketListenerState>) -> Response {
+    match state.rate_limit_dashboard {
+        Some(dashboard_state) => rate_limit_dashboard::refresh_all_handler(State(dashboard_state))
+            .await
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn dashboard_refresh_one_handler(
+    State(state): State<WebSocketListenerState>,
+    Path(account): Path<String>,
+) -> Response {
+    match state.rate_limit_dashboard {
+        Some(dashboard_state) => {
+            rate_limit_dashboard::refresh_one_handler(State(dashboard_state), Path(account))
+                .await
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn dashboard_manual_login_handler(
+    State(state): State<WebSocketListenerState>,
+    Path(account): Path<String>,
+) -> Response {
+    match state.rate_limit_dashboard {
+        Some(dashboard_state) => {
+            rate_limit_dashboard::start_manual_login_handler(State(dashboard_state), Path(account))
+                .await
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 pub(crate) async fn start_websocket_acceptor(
     bind_address: SocketAddr,
     transport_event_tx: mpsc::Sender<TransportEvent>,
     shutdown_token: CancellationToken,
     auth_policy: WebsocketAuthPolicy,
+    rate_limit_dashboard: Option<RateLimitDashboardRouterState>,
 ) -> IoResult<JoinHandle<()>> {
     if should_warn_about_unauthenticated_non_loopback_listener(bind_address, &auth_policy) {
         warn!(
@@ -134,17 +216,40 @@ pub(crate) async fn start_websocket_acceptor(
     }
     let listener = TcpListener::bind(bind_address).await?;
     let local_addr = listener.local_addr()?;
-    print_websocket_startup_banner(local_addr);
+    print_websocket_startup_banner(local_addr, rate_limit_dashboard.is_some());
     info!("app-server websocket listening on ws://{local_addr}");
 
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/readyz", get(health_check_handler))
-        .route("/healthz", get(health_check_handler))
+        .route("/healthz", get(health_check_handler));
+    if rate_limit_dashboard.is_some() {
+        router = router
+            .route(
+                "/rate-limit-dashboard",
+                get(rate_limit_dashboard::dashboard_page_handler),
+            )
+            .route("/rate-limit-dashboard/ws", get(dashboard_websocket_handler))
+            .route("/api/rate-limits", get(dashboard_rate_limits_handler))
+            .route(
+                "/api/rate-limits/refresh",
+                post(dashboard_refresh_all_handler),
+            )
+            .route(
+                "/api/rate-limits/refresh/{account}",
+                post(dashboard_refresh_one_handler),
+            )
+            .route(
+                "/api/rate-limits/login/{account}",
+                get(dashboard_manual_login_handler),
+            );
+    }
+    let router = router
         .fallback(any(websocket_upgrade_handler))
         .layer(middleware::from_fn(reject_requests_with_origin_header))
         .with_state(WebSocketListenerState {
             transport_event_tx,
             auth_policy: Arc::new(auth_policy),
+            rate_limit_dashboard,
         });
     let server = axum::serve(
         listener,
@@ -301,5 +406,35 @@ async fn run_websocket_inbound_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_browser_safe_http_path;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn browser_safe_http_paths_allow_dashboard_requests() {
+        assert_eq!(is_browser_safe_http_path("/readyz"), true);
+        assert_eq!(is_browser_safe_http_path("/healthz"), true);
+        assert_eq!(is_browser_safe_http_path("/rate-limit-dashboard"), true);
+        assert_eq!(is_browser_safe_http_path("/rate-limit-dashboard/ws"), true);
+        assert_eq!(is_browser_safe_http_path("/api/rate-limits"), true);
+        assert_eq!(
+            is_browser_safe_http_path("/api/rate-limits/refresh/lbcheng666%40163.com"),
+            true
+        );
+        assert_eq!(
+            is_browser_safe_http_path("/api/rate-limits/login/lbcheng68%40163.com"),
+            true
+        );
+    }
+
+    #[test]
+    fn browser_safe_http_paths_do_not_allow_unknown_routes() {
+        assert_eq!(is_browser_safe_http_path("/"), false);
+        assert_eq!(is_browser_safe_http_path("/v2"), false);
+        assert_eq!(is_browser_safe_http_path("/threads"), false);
     }
 }
