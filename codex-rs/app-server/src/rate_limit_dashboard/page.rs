@@ -202,7 +202,7 @@ pub(crate) const DASHBOARD_PAGE: &str = r#"<!DOCTYPE html>
           <th style="width: 8%">Plan</th>
           <th style="width: 12%">5 hours left</th>
           <th style="width: 12%">7 days left</th>
-          <th style="width: 14%">Updated</th>
+          <th style="width: 14%">5h / 7d reset</th>
           <th style="width: 18%">Error</th>
           <th style="width: 8%">Action</th>
         </tr>
@@ -273,6 +273,20 @@ pub(crate) const DASHBOARD_PAGE: &str = r#"<!DOCTYPE html>
         return "-";
       }
       return `${Math.max(0, 100 - windowData.usedPercent)}%`;
+    }
+
+    function resetTimestamp(windowData) {
+      if (!windowData || !windowData.resetsAt) {
+        return "-";
+      }
+      return formatTimestamp(windowData.resetsAt);
+    }
+
+    function resetTimes(snapshot) {
+      return `
+        <div>${escapeHtml(resetTimestamp(snapshot?.primary))}</div>
+        <div>${escapeHtml(resetTimestamp(snapshot?.secondary))}</div>
+      `;
     }
 
     function plan(snapshot) {
@@ -360,7 +374,7 @@ pub(crate) const DASHBOARD_PAGE: &str = r#"<!DOCTYPE html>
           <td>${escapeHtml(plan(snapshot))}</td>
           <td>${escapeHtml(remaining(snapshot?.primary))}</td>
           <td>${escapeHtml(remaining(snapshot?.secondary))}</td>
-          <td>${escapeHtml(formatTimestamp(account.fetchedAt))}</td>
+          <td>${resetTimes(snapshot)}</td>
           <td>${renderErrorCell(account.error)}</td>
           <td><div class="action-group">${buttons.join("")}</div></td>
         `;
@@ -414,6 +428,25 @@ pub(crate) const DASHBOARD_PAGE: &str = r#"<!DOCTYPE html>
       render();
     }
 
+    function clearLoadingAccounts(message) {
+      if (!state.response?.accounts) {
+        state.loading = false;
+        return;
+      }
+      let changed = false;
+      const accounts = state.response.accounts.map((account) => {
+        if (account.status !== "loading") {
+          return account;
+        }
+        changed = true;
+        return { ...account, status: "failed", error: message };
+      });
+      if (changed) {
+        state.response = { ...state.response, accounts };
+      }
+      state.loading = false;
+    }
+
     function sendSocketMessage(message) {
       if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
         renderError("Dashboard websocket not connected.");
@@ -464,8 +497,9 @@ pub(crate) const DASHBOARD_PAGE: &str = r#"<!DOCTYPE html>
             return;
           }
           if (payload.type === "error") {
-            state.loading = inferLoading(state.response);
-            renderError(payload.message || "Dashboard websocket command failed.");
+            const message = payload.message || "Dashboard websocket command failed.";
+            clearLoadingAccounts(message);
+            renderError(message);
             render();
             return;
           }
@@ -481,7 +515,7 @@ pub(crate) const DASHBOARD_PAGE: &str = r#"<!DOCTYPE html>
         }
         state.connected = false;
         state.socket = null;
-        state.loading = inferLoading(state.response);
+        clearLoadingAccounts("Dashboard websocket disconnected before refresh completed.");
         render();
         scheduleReconnect();
       });
@@ -490,7 +524,9 @@ pub(crate) const DASHBOARD_PAGE: &str = r#"<!DOCTYPE html>
         if (state.socket !== socket) {
           return;
         }
+        clearLoadingAccounts("Dashboard websocket error before refresh completed.");
         renderError("Dashboard websocket error.");
+        render();
       });
     }
 
@@ -517,7 +553,41 @@ pub(crate) const DASHBOARD_PAGE: &str = r#"<!DOCTYPE html>
 
     function startManualLogin(email) {
       renderError(`OpenAI device-code login for ${email} opened in a new tab. Finish it there, then click Refresh.`);
-      window.open(`/api/rate-limits/login/${encodeURIComponent(email)}`, "_blank", "noopener");
+      const url = `/api/rate-limits/login/${encodeURIComponent(email)}`;
+      const loginWindow = window.open("", "_blank");
+      if (!loginWindow) {
+        window.open(url, "_blank", "noopener");
+        return;
+      }
+      const loadingHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Manual Login</title>
+  <style>
+    body { margin: 0; color: #111; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 560px; margin: 0 auto; padding: 32px 20px 40px; }
+    h1 { margin: 0 0 8px; font-size: 28px; line-height: 1.2; }
+    p { margin: 0; color: #666; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Manual login for ${escapeHtml(email)}</h1>
+    <p>Loading OpenAI device code...</p>
+  </main>
+</body>
+</html>`;
+      try {
+        loginWindow.opener = null;
+        loginWindow.document.open();
+        loginWindow.document.write(loadingHtml);
+        loginWindow.document.close();
+        loginWindow.location.replace(url);
+      } catch (error) {
+        loginWindow.location.href = url;
+      }
     }
 
     dom.search.addEventListener("input", (event) => {
